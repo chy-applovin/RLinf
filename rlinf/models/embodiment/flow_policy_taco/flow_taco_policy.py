@@ -94,6 +94,11 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
         )
         self.policy = policy
         self.normalizer = normalizer
+        # RL fine-tuning needs a deterministic policy forward: the PPO ratio
+        # compares rollout-time and training-time log-probs of the SAME
+        # transition, so IL-time dropout (p_drop=0.1) must be disabled or the
+        # recomputed mean/std (and thus the ratio) would be stochastic.
+        self._disable_dropout(self.policy)
 
         self.action_dim = int(policy.action_dim)  # model action dim (44)
         self.pred_horizon = int(policy.Tp)
@@ -179,6 +184,14 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
 
     def set_global_step(self, global_step: int) -> None:
         self.global_step = int(global_step)
+
+    @staticmethod
+    def _disable_dropout(module: nn.Module) -> None:
+        for m in module.modules():
+            if isinstance(m, nn.Dropout):
+                m.p = 0.0
+            elif isinstance(m, nn.MultiheadAttention):
+                m.dropout = 0.0
 
     # -------------------------------------------------------------- obs handling
     def _build_normalized_obs(
