@@ -99,6 +99,30 @@ integration points:
    `rlinf/envs/taco/rewards.py` (only sensible for cheap/remote API judges —
    blocking calls stall the rollout loop).
 
+## Experiment record
+
+### 2026-06-11 - from-scratch PPO sanity run (`taco_allegro_ppo_flow_scratch.yaml`)
+
+Random-init weights (`actor.model.random_init: True`; ckpt used only as
+architecture/IO spec + normalizer stats), single real scene
+`brush__brush__bowl__20230927_027`, dense tracking reward vs
+`trajectory_ctrl_30hz_im.npz`, PPO 300 steps x 64 envs x 160 steps, 8xH100,
+~9.7 s/step (~50 min). wandb:
+[taco-allegro-flow-rl/48v2zqaf](https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/48v2zqaf).
+
+| metric | step ~0 | step 299 |
+|---|---|---|
+| train `env/success_once` (tool err < 0.1 m) | 0.19 | **1.00** |
+| train `env/tool_pos_err_final_m` | 0.76 | **0.033** |
+| eval (deterministic ODE) `success_once` | 0.50 @49 | **1.00** @199-299 |
+| eval `tool_pos_err_final_m` | 0.48 @49 | **0.033** |
+| `rollout/rewards` per step | 0.39 | 0.46 |
+
+Conclusion: the full RL loop (noise-injected flow sampling -> PPO -> weight
+sync) trains a randomly initialized flow policy to track the demo's object
+motion from scratch. Checkpoints (DCP + model_state_dict) every 50 steps under
+`<log_path>/scratch-ppo-tracking-1ep-brush_bowl/checkpoints/global_step_*/actor/`.
+
 ## Known limitations (v0)
 
 - `auto_reset=False` only: fixed-length rollout epochs, episodes truncate at
