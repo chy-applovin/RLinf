@@ -96,6 +96,14 @@ class EnvOutput:
             else None
         )
 
+    _STANDARD_OBS_KEYS = (
+        "main_images",
+        "wrist_images",
+        "extra_view_images",
+        "states",
+        "task_descriptions",
+    )
+
     def prepare_observations(self, obs: dict[str, Any]) -> dict[str, Any]:
         image_tensor = obs["main_images"] if "main_images" in obs else None
         wrist_image_tensor = obs["wrist_images"] if "wrist_images" in obs else None
@@ -109,13 +117,19 @@ class EnvOutput:
             else None
         )
 
-        return {
+        prepared = {
             "main_images": image_tensor,  # [N_ENV, H, W, C]
             "wrist_images": wrist_image_tensor,  # [N_ENV, H, W, C] or [N_ENV, N_IMG, H, W, C]
             "extra_view_images": extra_view_image_tensor,  # [N_ENV, N_IMG, H, W, C]
             "states": states,
             "task_descriptions": task_descriptions,
         }
+        # Pass through non-standard observation modalities (e.g. point clouds
+        # from the TACO env) so envs are not limited to image/state obs.
+        for key, value in obs.items():
+            if key not in self._STANDARD_OBS_KEYS:
+                prepared[key] = value
+        return prepared
 
     @staticmethod
     def merge_env_outputs(env_outputs: list[dict]) -> dict[str, Any]:
