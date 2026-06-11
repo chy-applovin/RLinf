@@ -4,6 +4,11 @@ model_type: "flow_policy_taco"
 # should be set in the specific training config file.
 model_path: "/path/to/flow-policy/checkpoints/best.pt"
 
+# If True, use the checkpoint only as the architecture/IO spec (shape_meta,
+# model hyperparams, dataset-fitted normalizer stats) and keep RANDOM weights
+# in the flow transformer - RL from scratch.
+random_init: False
+
 precision: null # keep the small flow transformer in fp32
 
 # Action interface: the policy predicts a (Tp=16, 44) qpos chunk; the env

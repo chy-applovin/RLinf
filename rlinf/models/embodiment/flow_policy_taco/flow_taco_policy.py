@@ -137,7 +137,14 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
     # ------------------------------------------------------------ construction
     @classmethod
     def from_config(cls, cfg: DictConfig) -> "FlowPolicyTacoForRL":
-        """Build from cfg.actor.model (model_path = flow-policy .pt ckpt)."""
+        """Build from cfg.actor.model (model_path = flow-policy .pt ckpt).
+
+        With ``random_init: True`` the checkpoint is used ONLY as the
+        architecture + I/O spec: shape_meta / model hyperparameters / the
+        dataset-fitted Normalizer stats (obs/action scaling is part of the
+        input-output contract, not learned policy weights). The transformer's
+        weights keep their fresh random initialization - RL from scratch.
+        """
         from flow_policy.data.normalizer import Normalizer
         from flow_policy.models.transformer_policy import (
             FlowMatchingTransformerPolicy,
@@ -145,6 +152,7 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
 
         ckpt_path = cfg.model_path
         assert ckpt_path, "actor.model.model_path must point to a flow-policy .pt"
+        random_init = bool(cfg.get("random_init", False))
         state = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         sm = state["shape_meta"]
         mcfg = {k: v for k, v in state["cfg"]["model"].items() if k != "_target_"}
@@ -155,7 +163,8 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
             point_dim=sm.get("point_dim"),
             qpos_dim=sm.get("qpos_dim"),
         )
-        policy.load_state_dict(state["model"])
+        if not random_init:
+            policy.load_state_dict(state["model"])
         normalizer.load_state_dict(state["normalizer"])
 
         algo_cfg = state["cfg"].get("algo", {})
