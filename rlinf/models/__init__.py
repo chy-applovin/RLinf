@@ -91,6 +91,11 @@ def _register_builtin_models():
 
         return get_model(cfg, torch_dtype)
 
+    def _build_flow_policy_taco(cfg: DictConfig, torch_dtype):
+        from rlinf.models.embodiment.flow_policy_taco import get_model
+
+        return get_model(cfg, torch_dtype)
+
     def _build_lingbotvla(cfg: DictConfig, torch_dtype):
         from rlinf.models.embodiment.lingbotvla import get_model
 
@@ -177,6 +182,12 @@ def _register_builtin_models():
     register_model(
         SupportedModel.FLOW_POLICY.value,
         _build_flow_policy,
+        category="embodied",
+        force=True,
+    )
+    register_model(
+        SupportedModel.FLOW_POLICY_TACO.value,
+        _build_flow_policy_taco,
         category="embodied",
         force=True,
     )
