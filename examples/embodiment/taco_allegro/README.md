@@ -144,6 +144,40 @@ Two lessons baked into the metric/reward design backlog:
    reward - the intended usage (RL fine-tuning FROM the IL checkpoint,
    random_init: False) starts inside the reward basin instead.
 
+### 2026-06-11 - hand-only tracking reward, from scratch (PAUSED at step 311, diagnosed)
+
+`taco_allegro_ppo_flow_scratch_hand.yaml`, wandb run `o0oo4y92`. Reward
+declined 0.456 -> 0.40 instead of learning; paused for diagnosis. Findings
+(step-200 ckpt closed-loop eval + demo-obs probes + wandb):
+
+1. **Phase is unobservable from scratch.** Tracking a time-varying 44-dof
+   demo requires knowing "which demo frame is now". The IL checkpoint reads
+   phase from its obs (demo-obs probe: output-vs-phase corr **0.985**)
+   because on-distribution qpos history IS the phase; the random-init/RL
+   policies are phase-blind (corr 0.23 / **0.11**) - off-distribution own
+   states and static object clouds carry no time signal. Without phase, the
+   reachable policy class is ~static poses, ceiling r~=0.67 (demo-time-mean
+   pose baseline).
+2. **PPO drifted BELOW even that static ceiling (0.40 < 0.52 frame-0-pose <
+   0.67 mean-pose).** Critic EV ~0.43: more than half the return variance is
+   uncontrollable (SDE exploration + contact chaos), so advantages mostly
+   reinforce noise-correlated base motion. The first update was huge
+   (approx_kl 6.9 at step 0, lr 3e-4 on a random policy) and damaged the
+   decent initial prior (random-init flow ~= dataset marginal distribution,
+   r=0.456). Closed-loop result: the bimanual base flails out of the
+   workspace and launches both objects meters away (target_pos_err_final
+   6.1 m) - nothing penalizes collisions in the hand-only reward.
+3. **Reward shape dilutes the signal.** mean|dq| over 44 dims mixes base
+   meters with finger radians: base error dominates (1.09 vs 0.23), and the
+   per-dof gradient at err~0.5 is ~0.02/rad - ~500x weaker than the object
+   terms near their basins in the previous run.
+
+Fix directions (not yet applied): add phase/goal conditioning to the obs
+(DeepMimic-style), per-group error scales (base-pos/base-rot/fingers),
+small nonzero object terms to penalize collisions, KL-guarded warmup (lower
+initial lr / critic warmup), and/or RL from the IL checkpoint (phase-aware
+by construction).
+
 ## Simulator backends: CPU (default) vs GPU (MuJoCo Warp)
 
 `env.*.sim_backend: cpu | gpu` selects between the original threaded
