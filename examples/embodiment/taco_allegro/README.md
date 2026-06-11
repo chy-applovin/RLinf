@@ -70,7 +70,7 @@ Knobs you will most likely touch:
 | executed chunk length | `actor.model.num_action_chunks` | 4 |
 | episode subset | `env.train.{episodes,categories,one_per_category,max_episodes}` | all 411 |
 | reward | `env.train.reward.*` | tracking |
-| PPO ratio granularity | `algorithm.logprob_type` | `chunk_level` (try `action_level` if ratios saturate: chunk-level sums 4×44 Gaussian terms) |
+| PPO ratio granularity | `algorithm.logprob_type` | `token_level` (per Gaussian element; `chunk_level` sums 4×44 terms and explodes the ratio) |
 | parallel envs / rollout length | `env.train.total_num_envs`, `max_steps_per_rollout_epoch` | 32, 160 |
 | wandb | `runner.logger.logger_backends` | tensorboard only |
 

@@ -45,11 +45,12 @@ algorithm:
   rollout_epoch: 1
   eval_rollout_epoch: 1
 
-  # one PPO sample = one executed action chunk (num_action_chunks steps);
-  # logprob summed over the chunk's (chunk x 44) Gaussian elements.
-  # Alternatives: action_level / token_level (see rlinf/algorithms/utils.py).
+  # one PPO sample = one executed action chunk (num_action_chunks steps).
+  # logprob_type token_level keeps per-element ratios: summing the chunk's
+  # 4x44=176 Gaussian log-prob elements (chunk_level) makes the PPO ratio
+  # explode after a few update epochs on this high-dim action space.
   reward_type: chunk_level
-  logprob_type: chunk_level
+  logprob_type: token_level
   entropy_type: token_level
 
   update_epoch: 4
@@ -61,7 +62,7 @@ algorithm:
   clip_ratio_high: 0.2
   clip_ratio_low: 0.2
   clip_ratio_c: 3.0
-  value_clip: 0.2
+  value_clip: 10.0 # returns are O(10-100) (tracking reward ~1/step over 160 steps)
   huber_delta: 10.0
 
   gamma: 0.99

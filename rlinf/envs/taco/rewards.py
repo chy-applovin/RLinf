@@ -67,14 +67,15 @@ class ZeroReward(BaseTacoReward):
 class TrackingReward(BaseTacoReward):
     """Dense demo-tracking reward.
 
-    r_t = w_tool   * exp(-|tool_pos   - demo_tool_pos|   / s_tool)
-        + w_target * exp(-|target_pos - demo_target_pos| / s_target)
-        + w_hand   * exp(-mean|hand_qpos - demo_hand_qpos| / s_hand)
+    r_t = [ w_tool   * exp(-|tool_pos   - demo_tool_pos|   / s_tool)
+          + w_target * exp(-|target_pos - demo_target_pos| / s_target)
+          + w_hand   * exp(-mean|hand_qpos - demo_hand_qpos| / s_hand) ] / W
 
-    Each term is bounded in (0, w], so the per-step reward is bounded and the
-    episode return scales with how long the rollout stays on the demo
-    trajectory. Executed step k (1-based) is compared against demo frame
-    min(k, T-1), matching the dataset's action_offset=1 convention.
+    where W = w_tool + w_target + w_hand when ``normalize_by_weights`` (default),
+    so the per-step reward is bounded in (0, 1] and the episode return scales
+    with how long the rollout stays on the demo trajectory. Executed step k
+    (1-based) is compared against demo frame min(k, T-1), matching the
+    dataset's action_offset=1 convention.
     """
 
     def __init__(self, cfg: dict[str, Any]):
@@ -85,6 +86,11 @@ class TrackingReward(BaseTacoReward):
         self.s_tool = float(cfg.get("tool_pos_scale", 0.05))  # meters
         self.s_target = float(cfg.get("target_pos_scale", 0.05))  # meters
         self.s_hand = float(cfg.get("hand_qpos_scale", 0.5))  # radians
+        self.norm = (
+            self.w_tool + self.w_target + self.w_hand
+            if bool(cfg.get("normalize_by_weights", True))
+            else 1.0
+        )
 
     def compute(self, sub: "_SubEnv") -> tuple[float, dict[str, float]]:
         from rlinf.envs.taco.scene import HAND_DIM, TARGET_OBJ_QPOS, TOOL_OBJ_QPOS
@@ -110,7 +116,7 @@ class TrackingReward(BaseTacoReward):
             self.w_tool * np.exp(-tool_err / self.s_tool)
             + self.w_target * np.exp(-target_err / self.s_target)
             + self.w_hand * np.exp(-hand_err / self.s_hand)
-        )
+        ) / self.norm
         info = {
             "tool_pos_err": tool_err,
             "target_pos_err": target_err,
