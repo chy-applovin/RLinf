@@ -1,5 +1,14 @@
 env_type: taco
 
+# Simulator backend: "cpu" (threaded CPU MuJoCo, original implementation) or
+# "gpu" (MuJoCo Warp, batched worlds on one CUDA device). The GPU backend
+# currently requires a SINGLE episode per worker (episodes: [name]), supports
+# reward.type tracking/zero only, and no video capture.
+sim_backend: cpu
+gpu_cuda_graph: True
+gpu_nconmax_per_env: 100
+gpu_njmax_per_env: 350
+
 # ------------------------------------------------------------------ dataset
 # Each episode folder = one scene (env) instance: scene.xml + objects/ +
 # trajectory_ctrl_30hz*.npz + pointcloud/.

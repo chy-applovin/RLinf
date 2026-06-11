@@ -144,6 +144,33 @@ Two lessons baked into the metric/reward design backlog:
    reward - the intended usage (RL fine-tuning FROM the IL checkpoint,
    random_init: False) starts inside the reward basin instead.
 
+## Simulator backends: CPU (default) vs GPU (MuJoCo Warp)
+
+`env.*.sim_backend: cpu | gpu` selects between the original threaded
+CPU-MuJoCo env (`taco_env.py`, untouched) and a MuJoCo-Warp batched env
+(`taco_env_gpu.py`: physics, point-cloud synthesis and tracking reward all
+batched in torch on one CUDA device). GPU v1 constraints: exactly one episode
+per worker (`episodes: [name]`), reward `tracking`/`zero`, no video.
+
+Benchmark on this machine (H100, CUDA driver 12.2, single episode,
+demo-action chunks, env stepping + obs + reward only):
+
+| num_envs | CPU (16 threads) | GPU (mjwarp) |
+|---|---|---|
+| 64 | **4445 steps/s** | 1567 steps/s |
+| 256 | **4158 steps/s** | 589 steps/s |
+| 1024 | - | OOM (convex narrowphase workspace ~100 GB) |
+
+Physics parity is excellent (open-loop demo replay: identical hand error to
+4 decimals), but the GPU backend is currently SLOWER here because (a) the
+CUDA driver is 12.2 while mjwarp's CUDA-graph capture needs >=12.4
+(conditional graph nodes), so every physics step pays hundreds of Python
+kernel launches, and (b) the 8-convex-hull objects x dense hand contact pairs
+make the GPU narrowphase workspace scale badly with worlds. Also note env
+physics is only ~5% of the training step time at 64 envs (the bottleneck is
+the policy's 16-step denoising inference). Default stays `cpu`; revisit `gpu`
+after a driver upgrade (>=12.4) or for far larger world counts.
+
 ## Known limitations (v0)
 
 - `auto_reset=False` only: fixed-length rollout epochs, episodes truncate at

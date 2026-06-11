@@ -140,6 +140,10 @@ def get_env_cls(env_type: str, env_cfg=None):
 
         return PolarisEnv
     elif env_type == SupportedEnvType.TACO:
+        if env_cfg is not None and env_cfg.get("sim_backend", "cpu") == "gpu":
+            from rlinf.envs.taco.taco_env_gpu import TacoEnvGPU
+
+            return TacoEnvGPU
         from rlinf.envs.taco.taco_env import TacoEnv
 
         return TacoEnv
