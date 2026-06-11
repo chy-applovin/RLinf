@@ -1,0 +1,61 @@
+env_type: taco
+
+# ------------------------------------------------------------------ dataset
+# Each episode folder = one scene (env) instance: scene.xml + objects/ +
+# trajectory_ctrl_30hz*.npz + pointcloud/.
+dataset_root: /root/Data/taco-brush-allegro
+# Allegro STL meshes referenced by scene.xml (meshdir=../../../assets/).
+allegro_assets_root: /root/Spider/spider/assets/robots/allegro/assets
+# Where the Spider "processed" symlink layout is materialized at runtime.
+scene_root: /tmp/taco_scene_root
+# Demo trajectory variant; *_im.npz = improved IK retarget labels (must match
+# the labels the flow-policy checkpoint was trained on).
+trajectory_file: trajectory_ctrl_30hz_im.npz
+
+# Episode selection (null = all 411 episodes).
+episodes: null            # explicit list of episode folder names
+categories: null          # filter by verb__tool__target categories
+one_per_category: False   # keep one (deterministic) episode per category
+max_episodes: null
+
+# ----------------------------------------------- obs contract (match the ckpt!)
+# These must match the flow-policy checkpoint's shape_meta.
+obs_mode: pc2_qpos        # pc_qpos | pc2_qpos
+obs_horizon: 16           # To
+num_points: 512           # K points per cloud (FPS, deterministic seed 0)
+
+# ------------------------------------------------------------------ episode
+total_num_envs: null
+auto_reset: False
+ignore_terminations: False
+max_steps_per_rollout_epoch: 160
+max_episode_steps: 160    # control steps @30Hz; per-episode cap is min(this, T_demo-1)
+success_threshold_m: 0.1  # tool tracking success at episode end (metric only)
+
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: True
+is_eval: False
+
+num_threads: 0            # physics thread pool; 0 -> min(num_envs, 16)
+
+# ------------------------------------------------------------------- reward
+# Pluggable (rlinf/envs/taco/rewards.py): tracking | zero | vlm_judge (TBD).
+reward:
+  type: tracking
+  tool_pos_weight: 1.0
+  target_pos_weight: 1.0
+  hand_qpos_weight: 0.1
+  tool_pos_scale: 0.05    # meters
+  target_pos_scale: 0.05  # meters
+  hand_qpos_scale: 0.5    # radians
+
+# ------------------------------------------------------------------- video
+# Offscreen rendering needs a working GL backend (e.g. MUJOCO_GL=glfw + xvfb).
+video_cfg:
+  save_video: False
+  info_on_video: False
+  video_base_dir: ${runner.logger.log_path}/video/train
+video_num_envs: 4
+render_height: 240
+render_width: 320
