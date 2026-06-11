@@ -119,9 +119,30 @@ architecture/IO spec + normalizer stats), single real scene
 | `rollout/rewards` per step | 0.39 | 0.46 |
 
 Conclusion: the full RL loop (noise-injected flow sampling -> PPO -> weight
-sync) trains a randomly initialized flow policy to track the demo's object
-motion from scratch. Checkpoints (DCP + model_state_dict) every 50 steps under
+sync) trains a randomly initialized flow policy from scratch and improves the
+tracking return. Checkpoints (DCP + model_state_dict) every 50 steps under
 `<log_path>/scratch-ppo-tracking-1ep-brush_bowl/checkpoints/global_step_*/actor/`.
+
+**Qualitative follow-up** (closed-loop videos via `export_flow_ckpt.py` +
+`mujoco-spider-env/scripts/rollout_eval.py`, step 50 vs step 300): neither
+checkpoint grasps the brush - the sim tool trajectories of the two are
+bit-identical (the hand never touches it). PPO instead converged to a
+"don't disturb anything" local optimum: step 50 still knocks the bowl away
+(target_err_final 1.07 m), step 300 keeps both objects undisturbed. Per-step
+reward decomposition: doing nothing earns ~0.80/step outside the manipulation
+window and ~0.20/step inside it (the unearned tool term ~= 23 return units),
+so the reward does prefer real manipulation, but exp(-err/0.05) is nearly
+flat beyond ~15 cm and exploration never finds grasping from scratch.
+
+Two lessons baked into the metric/reward design backlog:
+
+1. `success_tool<0.1m` at the FINAL frame is trivially satisfiable on
+   episodes whose demo returns objects near their start pose (here the
+   brush's net displacement at frame 160 is only 0.034 m) - success should be
+   measured during the peak-displacement window or via mean tracking error;
+2. from-scratch RL cannot discover dexterous grasping under a pure tracking
+   reward - the intended usage (RL fine-tuning FROM the IL checkpoint,
+   random_init: False) starts inside the reward basin instead.
 
 ## Known limitations (v0)
 
