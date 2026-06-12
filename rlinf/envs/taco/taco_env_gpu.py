@@ -97,6 +97,15 @@ class TacoEnvGPU(gym.Env):
         assert not bool(cfg.video_cfg.save_video), (
             "TacoEnvGPU does not support video capture (use sim_backend: cpu)"
         )
+        assert not bool((cfg.get("rsi", None) or {}).get("enabled", False)), (
+            "DeepMimic RSI is not implemented in the GPU backend (use sim_backend: cpu)"
+        )
+        assert not bool(
+            (cfg.get("early_termination", None) or {}).get("enabled", False)
+        ), (
+            "DeepMimic early termination is not implemented in the GPU backend "
+            "(use sim_backend: cpu)"
+        )
         self.ignore_terminations = bool(cfg.ignore_terminations)
         self.group_size = int(cfg.group_size)
 

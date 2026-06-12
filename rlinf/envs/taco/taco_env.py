@@ -46,6 +46,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from rlinf.envs.taco.deepmimic import EarlyTermination, RSISampler
 from rlinf.envs.taco.rewards import BaseTacoReward, build_reward
 from rlinf.envs.taco.scene import (
     HAND_DIM,
@@ -70,23 +71,32 @@ class _SubEnv:
     substeps: int
     ep_len: int  # control steps until truncation
     steps: int = 0
+    # DeepMimic RSI: episode starts at this demo frame (0 = original behavior)
+    start_frame: int = 0
     obs_hist: list[dict[str, np.ndarray]] = field(default_factory=list)
     # metric accumulators
     ret: float = 0.0
     done: bool = False
+    terminated: bool = False  # DeepMimic ET: failure termination (vs truncation)
     final_tool_err: float = float("nan")
     final_target_err: float = float("nan")
     final_hand_err: float = float("nan")
     renderer: Optional[mujoco.Renderer] = None
 
     def demo_qpos(self, executed_steps: int) -> np.ndarray:
-        """Frame-aligned demo state: executed step k <-> demo frame min(k, T-1).
+        """Frame-aligned demo state: executed step k <-> frame min(s0+k, T-1).
 
         Dataset convention is ``action_offset=1``: the action executed at step
-        ``k`` targets demo frame ``k`` (0-based executed index k-1 -> frame k).
+        ``k`` targets demo frame ``s0 + k`` where ``s0`` is the episode's RSI
+        start frame (0 without RSI).
         """
-        t = min(executed_steps, self.episode.num_frames - 1)
+        t = min(self.start_frame + executed_steps, self.episode.num_frames - 1)
         return self.episode.qpos_demo[t]
+
+    @property
+    def demo_frame(self) -> int:
+        """Frame-aligned demo index of the current state."""
+        return min(self.start_frame + self.steps, self.episode.num_frames - 1)
 
     def obs_frame(self, need_tool: bool) -> dict[str, np.ndarray]:
         """Single-frame observation synthesized from the live sim state."""
@@ -185,6 +195,24 @@ class TacoEnv(gym.Env):
             reward_cfg = OmegaConf.to_container(reward_cfg, resolve=True)
         self.reward_fn: BaseTacoReward = build_reward(reward_cfg)
 
+        # ------------------------------------- DeepMimic aids (default off)
+        rsi_cfg = cfg.get("rsi", None)
+        if rsi_cfg is not None and OmegaConf.is_config(rsi_cfg):
+            rsi_cfg = OmegaConf.to_container(rsi_cfg, resolve=True)
+        self.rsi = RSISampler(rsi_cfg, seed=self.seed + 1)
+
+        et_cfg = cfg.get("early_termination", None)
+        if et_cfg is not None and OmegaConf.is_config(et_cfg):
+            et_cfg = OmegaConf.to_container(et_cfg, resolve=True)
+        self._et_cfg = dict(et_cfg) if et_cfg else {}
+        self.et_enabled = bool(self._et_cfg.get("enabled", False))
+        if self.et_enabled:
+            assert not self.ignore_terminations, (
+                "early_termination requires ignore_terminations=False "
+                "(terminations must reach the loss mask / GAE)"
+            )
+        self._et_cache: dict[str, EarlyTermination] = {}
+
         # ------------------------------------------------------------- runtime
         self.video_cfg = cfg.video_cfg
         self._video_num_envs = int(cfg.get("video_num_envs", 4))
@@ -246,16 +274,30 @@ class TacoEnv(gym.Env):
             self._episode_cache[key] = (ep, model)
         return self._episode_cache[key]
 
+    def _get_early_termination(self, ep, model) -> Optional[EarlyTermination]:
+        if not self.et_enabled:
+            return None
+        if ep.name not in self._et_cache:
+            self._et_cache[ep.name] = EarlyTermination(self._et_cfg, model, ep)
+        return self._et_cache[ep.name]
+
     def _make_subenv(self, episode_id: int) -> _SubEnv:
         ep, model = self._get_episode(episode_id)
+        # DeepMimic RSI: start from a randomly sampled reference frame
+        start_frame = self.rsi.sample_start_frame(ep.num_frames)
         data = mujoco.MjData(model)
-        data.qpos[:] = ep.qpos_demo[0]
-        data.qvel[:] = ep.qvel_demo[0]
+        data.qpos[:] = ep.qpos_demo[start_frame]
+        data.qvel[:] = ep.qvel_demo[start_frame]
         mujoco.mj_forward(model, data)
         substeps = max(1, round((1.0 / ep.frequency) / float(model.opt.timestep)))
-        ep_len = min(self.max_episode_steps, ep.num_frames - 1)
+        ep_len = min(self.max_episode_steps, ep.num_frames - 1 - start_frame)
         sub = _SubEnv(
-            episode=ep, model=model, data=data, substeps=substeps, ep_len=ep_len
+            episode=ep,
+            model=model,
+            data=data,
+            substeps=substeps,
+            ep_len=ep_len,
+            start_frame=start_frame,
         )
         frame0 = sub.obs_frame(self.need_tool_cloud)
         sub.obs_hist = [frame0] * self.obs_horizon
@@ -291,7 +333,17 @@ class TacoEnv(gym.Env):
         if len(sub.obs_hist) > self.obs_horizon:
             del sub.obs_hist[: -self.obs_horizon]
         sub.ret += reward
-        if sub.steps >= sub.ep_len:
+        # DeepMimic ET: failure termination (object escaped / lost tracking)
+        et = self._get_early_termination(sub.episode, sub.model)
+        if et is not None and not sub.done:
+            terminate, _reason = et.check(
+                sub.model, sub.data, sub.episode, sub.demo_frame, sub.steps
+            )
+            if terminate:
+                sub.terminated = True
+                sub.done = True
+                self._record_final_errors(sub)
+        if not sub.done and sub.steps >= sub.ep_len:
             sub.done = True
             self._record_final_errors(sub)
         return reward, info
@@ -335,10 +387,13 @@ class TacoEnv(gym.Env):
         )
         rewards = torch.tensor([r for r, _ in results], dtype=torch.float32)
 
-        truncations = torch.tensor(
-            [sub.done for sub in self.subenvs], dtype=torch.bool
+        terminations = torch.tensor(
+            [sub.terminated for sub in self.subenvs], dtype=torch.bool
         )
-        terminations = torch.zeros(self.num_envs, dtype=torch.bool)
+        truncations = torch.tensor(
+            [sub.done and not sub.terminated for sub in self.subenvs],
+            dtype=torch.bool,
+        )
 
         infos: dict[str, Any] = {}
         if self.record_metrics:
@@ -418,9 +473,9 @@ class TacoEnv(gym.Env):
             [sub.final_hand_err for sub in self.subenvs], dtype=torch.float32
         )
         success = (tool_err < self.success_threshold_m) & torch.tensor(
-            [sub.done for sub in self.subenvs]
+            [sub.done and not sub.terminated for sub in self.subenvs]
         )
-        return {
+        metrics = {
             "return": rets,
             "episode_len": lens,
             "reward": rets / lens,
@@ -429,6 +484,15 @@ class TacoEnv(gym.Env):
             "target_pos_err_final_m": target_err,
             "hand_qpos_err_final": hand_err,
         }
+        if self.et_enabled:
+            metrics["terminated_early"] = torch.tensor(
+                [float(sub.terminated) for sub in self.subenvs]
+            )
+        if self.rsi.enabled:
+            metrics["rsi_start_frame"] = torch.tensor(
+                [float(sub.start_frame) for sub in self.subenvs]
+            )
+        return metrics
 
     # ------------------------------------------------------------------ render
     def capture_image(self, infos=None) -> np.ndarray:

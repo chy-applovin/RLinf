@@ -178,6 +178,40 @@ small nonzero object terms to penalize collisions, KL-guarded warmup (lower
 initial lr / critic warmup), and/or RL from the IL checkpoint (phase-aware
 by construction).
 
+## DeepMimic training aids (config-gated, default off)
+
+Two techniques from DeepMimic (Peng et al. 2018), implemented in
+`rlinf/envs/taco/deepmimic.py` with guarded hooks in the CPU env (flags off =>
+behavior identical to before; GPU backend asserts them off):
+
+* **RSI** (`env.*.rsi.enabled`): episodes start at a uniformly sampled demo
+  frame (full hand+object qpos/qvel from the reference), so late-demo phases
+  are visited from the first rollout instead of being gated on mastering
+  everything before them. Reward/termination frame-alignment, episode caps
+  and metrics are all start-frame aware (`rsi_start_frame` logged).
+  Caveat (same as DeepMimic): cold-starting mid-grasp contact states is
+  dynamically imperfect - open-loop demo replay from mid-grasp frames slowly
+  loses the object; the closed-loop policy is expected to correct.
+* **Early termination** (`env.*.early_termination.enabled`): episodes end at
+  the first unrecoverable failure so post-failure frames don't pollute the
+  batch or the critic's value targets. Criteria (combinable):
+  `hand_object_distance` - sim palm-to-object distance exceeds the demo's
+  distance at the aligned frame by a threshold (phase-aware drop detection);
+  `object_tracking` - object position error vs the aligned demo frame above a
+  threshold (the direct DeepMimic analog). Termination flows through RLinf's
+  existing terminations -> loss-mask/GAE machinery (requires
+  `ignore_terminations: False`); terminated episodes are never counted as
+  successes (`terminated_early` logged).
+
+Tests: `examples/embodiment/taco_allegro/test_deepmimic.py` (no Ray needed) -
+default-off regression, RSI distribution/alignment, both ET criteria firing.
+Recipe with both enabled: `taco_allegro_ppo_flow_ilft_dm.yaml` (GPUs 4-7).
+
+NOTE (operational): RLinf joins an existing Ray cluster (`address="auto"`,
+fixed namespace and channel/actor-group names), so two trainings cannot run
+concurrently on one machine even on disjoint GPUs - launch the DM run after
+the current one finishes.
+
 ## Simulator backends: CPU (default) vs GPU (MuJoCo Warp)
 
 `env.*.sim_backend: cpu | gpu` selects between the original threaded

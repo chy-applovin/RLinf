@@ -59,6 +59,18 @@ reward:
   target_pos_scale: 0.05  # meters
   hand_qpos_scale: 0.5    # radians
 
+# -------------------------------------- DeepMimic training aids (default off)
+# Both implemented for sim_backend: cpu; see rlinf/envs/taco/deepmimic.py.
+rsi: # Reference State Initialization: start episodes at random demo frames
+  enabled: False
+  min_remaining_steps: 8 # never start within this many steps of the demo end
+early_termination: # end episodes on unrecoverable failure
+  enabled: False
+  criteria: ["hand_object_distance"] # and/or "object_tracking"
+  min_steps: 8 # grace period (control steps) after each (re)set
+  hand_object_dist_threshold: 0.10 # sim minus demo palm-object distance (m)
+  object_err_threshold: 0.25 # tool/target pos error vs aligned demo (m)
+
 # ------------------------------------------------------------------- video
 # Offscreen rendering needs a working GL backend (e.g. MUJOCO_GL=glfw + xvfb).
 video_cfg:
