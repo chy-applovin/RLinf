@@ -83,6 +83,7 @@ class MetricLogger:
             settings = None
             if self.wandb_proxy:
                 settings = wandb.Settings(https_proxy=self.wandb_proxy)
+            wandb_tags = self.cfg.runner.logger.get("wandb_tags", None)
             wandb.init(
                 project=self.project_name,
                 name=experiment_name,
@@ -90,6 +91,8 @@ class MetricLogger:
                 settings=settings,
                 dir=wandb_log_path,
                 reinit=True,
+                notes=self.cfg.runner.logger.get("wandb_notes", None),
+                tags=list(wandb_tags) if wandb_tags else None,
             )
             logger["wandb"] = wandb
 

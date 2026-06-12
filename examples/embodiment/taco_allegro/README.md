@@ -83,9 +83,14 @@ Constraint chain to keep in mind when scaling:
 ## Reward: current state & VLM-as-judge plan
 
 The default `tracking` reward is a dense, bounded demo-tracking signal
-(tool/target object position + hand qpos vs the frame-aligned demo). Episode
-**success** is logged as `tool_pos_err_final_m < 0.1` — the same metric as the
-IL closed-loop eval — regardless of which reward is used.
+(tool/target object position + hand qpos vs the frame-aligned demo), plus an
+optional **contact-consistency term** (`reward.contact_weight`, default 0):
+when the frame-aligned demo has hand-object contact, the sim earns that term
+only by actually touching (right hand↔tool, left hand↔target) — added after
+the step-1000 evals exposed a "hover without grasping" reward hack (see the
+experiment record). Episode **success** is logged as
+`tool_pos_err_final_m < 0.1` — the same metric as the IL closed-loop eval —
+regardless of which reward is used.
 
 VLM-as-judge is **deliberately left unimplemented** (design TBD). Two ready
 integration points:
@@ -204,7 +209,53 @@ Fix directions: tighten `object_err_threshold` to ~0.10 (an untouched brush
 hits 0.158 mid-window -> non-grasping episodes get terminated and the hack
 becomes unprofitable), and/or add a contact-consistency reward term (reward
 hand-object contact when the demo is in contact, cf. Spider's contact
-reward).
+reward). **Both implemented in the v2 recipe below.**
+
+### 2026-06-12 - anti-reward-hacking v2 (`taco_allegro_ppo_flow_ilft_dm_v2.yaml`)
+
+Implements exactly the two fixes diagnosed above; everything else (IL init
+epoch_800.pt, object-dominant weights, RSI + both ET criteria, single
+episode, PPO hyperparams, 1000 steps, ckpt every 200, 4 GPUs) is unchanged
+from `taco_allegro_ppo_flow_ilft_dm.yaml`:
+
+1. **ET `object_err_threshold` 0.25 -> 0.10 m** (config-only). The threshold
+   must lie BELOW the demo's own peak brush displacement (0.178 m) to be able
+   to catch "never grasp" (untouched brush errs ~0.158 m mid-window).
+   Verified: the hover policy now terminates at control step ~52 instead of
+   surviving all 160 steps.
+2. **NEW contact-consistency reward term**
+   (`reward.contact_weight: 0.5`, `rlinf/envs/taco/rewards.py`). Per
+   (hand, object) pair - (right palm subtree, tool) and (left palm subtree,
+   target) - the pair scores 1 when the frame-aligned demo is NOT in contact,
+   and scores sim-contact (0/1, MuJoCo contact list with `dist <
+   contact_dist_tol`) when the demo IS in contact; the term is the mean of
+   the two pair scores. Demo contact flags are precomputed per episode by
+   replaying demo qpos through `mj_forward` (brush_027: tool contact 64% of
+   frames [12..152], target 46%). Direct analog of Spider's contact reward
+   with binary contact instead of contact-site positions (TACO demos carry no
+   contact labels). Spurious extra contact is deliberately not penalized
+   (IK-retargeted contact phase boundaries are noisy). With weights
+   tool 1.0 / target 1.0 / hand 0.1 / contact 0.5 (norm 2.6), hovering now
+   forfeits ~0.19 r/step across the contact window - an order of magnitude
+   more than the ~0.07 r/step the hack used to gain. CPU backend only
+   (`TacoEnvGPU` asserts `contact_weight == 0`).
+
+Calibration caveat (measured, in `test_antihack.py`): open-loop demo replay
+only reaches ~0.39 window contact-match (not 1.0) because the IK-retargeted
+grip is dynamically marginal - the replay sim loses brush contact mid-window.
+The term is a *discriminator* (hover scores exactly the zero-touch baseline,
+real engagement scores above it), not a tracking target; a closed-loop policy
+that actually squeezes can push it toward 1.
+
+Tests: `examples/embodiment/taco_allegro/test_antihack.py` (no Ray) - demo
+contact window sanity, hover == zero-touch baseline + replay strictly above
+it (+0.24), ET@0.10 kills the hover policy at step 52. Plus
+`test_deepmimic.py` regression (all pass).
+
+wandb: same project `taco-allegro-flow-rl`, run
+`ilft-ppo-dm-v2-contact-et010-1ep-brush_bowl`, with `wandb_notes`/`wandb_tags`
+(new optional `runner.logger` keys wired into `MetricLogger`) documenting the
+full setup in the run page.
 
 ## DeepMimic training aids (config-gated, default off)
 

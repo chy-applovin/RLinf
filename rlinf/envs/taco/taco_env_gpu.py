@@ -151,6 +151,10 @@ class TacoEnvGPU(gym.Env):
         assert self.reward_type in ("tracking", "zero"), (
             f"TacoEnvGPU supports tracking/zero rewards, got {self.reward_type}"
         )
+        assert float(reward_cfg.get("contact_weight", 0.0)) == 0.0, (
+            "the contact-consistency reward term is not implemented in the GPU "
+            "backend (use sim_backend: cpu)"
+        )
         self.w_tool = float(reward_cfg.get("tool_pos_weight", 1.0))
         self.w_target = float(reward_cfg.get("target_pos_weight", 1.0))
         self.w_hand = float(reward_cfg.get("hand_qpos_weight", 0.1))

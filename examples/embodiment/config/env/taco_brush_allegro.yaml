@@ -58,6 +58,12 @@ reward:
   tool_pos_scale: 0.05    # meters
   target_pos_scale: 0.05  # meters
   hand_qpos_scale: 0.5    # radians
+  # Contact-consistency term (anti reward-hacking; CPU backend only):
+  # when the aligned demo frame has hand-object contact, reward the sim for
+  # actually being in contact (right hand<->tool, left hand<->target).
+  # 0.0 = off. See TrackingReward docstring in rlinf/envs/taco/rewards.py.
+  contact_weight: 0.0
+  contact_dist_tol: 1.0e-3 # a contact counts as touching when dist < tol (m)
 
 # -------------------------------------- DeepMimic training aids (default off)
 # Both implemented for sim_backend: cpu; see rlinf/envs/taco/deepmimic.py.
@@ -69,7 +75,11 @@ early_termination: # end episodes on unrecoverable failure
   criteria: ["hand_object_distance"] # and/or "object_tracking"
   min_steps: 8 # grace period (control steps) after each (re)set
   hand_object_dist_threshold: 0.10 # sim minus demo palm-object distance (m)
-  object_err_threshold: 0.25 # tool/target pos error vs aligned demo (m)
+  # Tool/target pos error vs aligned demo (m). Must be BELOW the demo's own
+  # peak object displacement, otherwise "never touch the object" can pass the
+  # whole episode (on brush_027 an untouched brush peaks at ~0.158 m while the
+  # demo peaks at 0.178 m -> 0.25 never fires, ~0.10 fires mid-window).
+  object_err_threshold: 0.10
 
 # ------------------------------------------------------------------- video
 # Offscreen rendering needs a working GL backend (e.g. MUJOCO_GL=glfw + xvfb).
