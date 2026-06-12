@@ -178,6 +178,34 @@ small nonzero object terms to penalize collisions, KL-guarded warmup (lower
 initial lr / critic warmup), and/or RL from the IL checkpoint (phase-aware
 by construction).
 
+### 2026-06-11/12 - IL-finetune runs (plain + DeepMimic), step-1000 eval
+
+Runs `58erpa3a` (ilft) and `73hk83x4` (ilft+RSI/ET), both 1000 steps from
+epoch_800.pt, object-dominant tracking reward. Training reward improved
+0.435 -> 0.511 (ilft); closed-loop eval of BOTH step-1000 checkpoints:
+
+| | IL epoch_800 | RL ilft | RL ilft+DM |
+|---|---|---|---|
+| tool_err mean / final (m) | 0.109 / 0.085 | 0.080 / 0.033 | 0.080 / 0.033 |
+| brush displacement (max) | 0.082 m | **0.001 m** | **0.001 m** |
+| reward-equiv / step | 0.442 | 0.512 | 0.515 |
+
+**Both RL policies un-learned the grasp**: tool trajectories are bit-identical
+passive physics (the hand hovers near the brush but never closes), yet the
+reward IMPROVED - because on this episode an untouched brush (manipulation-
+window err 0.158, final 0.033) outscores IL's imperfect brushing (0.191 /
+0.085). PPO correctly optimized a mis-specified reward; the DeepMimic aids
+did not prevent it because (a) `object_err_threshold: 0.25` exceeds the
+demo's own max brush displacement (0.178 m), so "never grasp" never trips
+`object_tracking`, and (b) hovering keeps the palm within the
+`hand_object_distance` margin without grasping.
+
+Fix directions: tighten `object_err_threshold` to ~0.10 (an untouched brush
+hits 0.158 mid-window -> non-grasping episodes get terminated and the hack
+becomes unprofitable), and/or add a contact-consistency reward term (reward
+hand-object contact when the demo is in contact, cf. Spider's contact
+reward).
+
 ## DeepMimic training aids (config-gated, default off)
 
 Two techniques from DeepMimic (Peng et al. 2018), implemented in
