@@ -106,6 +106,10 @@ class TacoEnvGPU(gym.Env):
             "DeepMimic early termination is not implemented in the GPU backend "
             "(use sim_backend: cpu)"
         )
+        assert not bool((cfg.get("single_step", None) or {}).get("enabled", False)), (
+            "single_step RL is not implemented in the GPU backend "
+            "(use sim_backend: cpu)"
+        )
         self.ignore_terminations = bool(cfg.ignore_terminations)
         self.group_size = int(cfg.group_size)
 

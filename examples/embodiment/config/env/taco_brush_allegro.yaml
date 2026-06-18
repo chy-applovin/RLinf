@@ -81,6 +81,23 @@ early_termination: # end episodes on unrecoverable failure
   # demo peaks at 0.178 m -> 0.25 never fires, ~0.10 fires mid-window).
   object_err_threshold: 0.10
 
+# ---------------------------------- single-step (contextual-bandit) RL (off)
+# Episode-level RL of the IK-IL policy is hard (errors compound). single_step
+# instead samples one demo timestep t per env, inits the full state to q_t,
+# runs ONE control step, and rewards next-frame OBJECT tracking vs q_{t+1}.
+# Use with max_episode_steps=1, max_steps_per_rollout_epoch=1,
+# actor.model.num_action_chunks=1. Mutually exclusive with rsi/early_termination.
+# See rlinf/envs/taco/single_step.py. CPU backend only.
+single_step:
+  enabled: False
+  # iid Gaussian noise std added to the hand qpos of EVERY obs frame, so the
+  # policy learns a robust obs->action map (object tracked despite hand offset).
+  hand_obs_noise_std: 0.0
+  # also offset the actual initial hand state by the current-frame noise
+  # (physical offset to compensate) vs pure observation noise (denoise only).
+  perturb_init_hand: False
+  min_frame: 0 # never sample t below this demo frame
+
 # ------------------------------------------------------------------- video
 # Offscreen rendering needs a working GL backend (e.g. MUJOCO_GL=glfw + xvfb).
 video_cfg:

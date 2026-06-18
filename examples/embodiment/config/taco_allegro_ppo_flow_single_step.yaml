@@ -1,0 +1,224 @@
+# Single-step (contextual-bandit) RL of the IK-imitation flow policy, with
+# hand-observation-noise robustness augmentation.
+#
+# WHY: episode-level RL of the IK-IL policy keeps failing - errors compound over
+# the closed-loop rollout and the state drifts off the demo manifold (see the
+# step-1000 reward-hacking findings in taco_allegro/README.md). This recipe
+# drops episode-level RL entirely (NO RSI / NO early termination) for a much
+# easier learning problem:
+#
+#   * each env samples ONE demo timestep t (uniform over the trajectory) and
+#     initializes the full sim state to the reference frame q_t;
+#   * the To=16 observation window is the REAL demo history q_{t-To+1..t}
+#     (edge-padded), i.e. the exact window the IL policy was trained on;
+#   * the policy emits one action a_t, the sim runs ONE control step, and the
+#     reward is the next-frame OBJECT tracking error vs q_{t+1} (tool + target;
+#     hands are NOT rewarded). The episode ends immediately -> the PPO return is
+#     just that single-step reward (GAE bootstrap is masked by the done).
+#
+# ROBUSTNESS AUGMENTATION (the requested enhancement): iid Gaussian noise eps is
+# added to the hand qpos of EVERY observation frame (q_{t-To+1..t}^hand). With
+# perturb_init_hand=True the actual initial hand is offset by the current-frame
+# noise too, so the hand genuinely starts displaced and the policy must find an
+# action that still drives the OBJECT to its next reference pose despite the
+# offset (not merely denoise its input). Set perturb_init_hand=False for the
+# pure observation-noise variant.
+#
+# Policy init: the IK-imitation flow checkpoint epoch_800.pt (random_init=False).
+
+defaults:
+  - env/taco_brush_allegro@env.train
+  - env/taco_brush_allegro@env.eval
+  - model/flow_policy_taco@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: 0-3
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: taco-allegro-flow-rl
+    experiment_name: "single-step-rl-handnoise-1ep-brush_bowl"
+    logger_backends: ["wandb", "tensorboard"]
+    wandb_tags: ["single-step", "il-finetune", "hand-obs-noise", "object-tracking"]
+    wandb_notes: |
+      Single-step (contextual-bandit) RL of the IK-imitation flow policy
+      (epoch_800.pt) on the single TACO scene brush__brush__bowl__20230927_027.
+      Episode-level RL of this policy fails (compounding error / off-manifold
+      drift); this run replaces it with a 1-transition objective:
+        - each env samples one demo timestep t, inits full state to q_t, builds
+          the To=16 obs window from the REAL demo history q_{t-15..t} (the exact
+          IL window), runs ONE control step;
+        - reward = next-frame OBJECT tracking vs q_{t+1} (tool 1.0 + target 1.0,
+          normalized; hand weight 0 -> objects only, hands NOT rewarded);
+        - return = that single-step reward (no bootstrap; done masks GAE).
+      Robustness augmentation: iid Gaussian noise (std 0.02) added to the hand
+      qpos of every obs frame; perturb_init_hand=True -> the actual initial hand
+      is offset by the current-frame noise, so the policy must emit an action
+      that tracks the OBJECT despite a displaced hand (not just denoise input).
+      NO RSI / NO early termination. PPO flow_sde exploration noise 0.5,
+      512 single-step envs/global step, lr 1e-5 / value_lr 1e-4 (critic warmup),
+      num_action_chunks=1, 1000 steps, ckpt every 200, GPUs 0-3.
+
+  max_epochs: 1000
+  max_steps: -1
+
+  only_eval: False
+  val_check_interval: -1
+  save_interval: 200
+
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  normalize_advantages: True
+  kl_penalty: kl
+  group_size: 1
+  reward_coef: 1.0
+
+  rollout_epoch: 1
+  eval_rollout_epoch: 1
+
+  reward_type: chunk_level
+  logprob_type: token_level
+  entropy_type: token_level
+
+  update_epoch: 4
+  adv_type: gae
+  loss_type: actor_critic
+  loss_agg_func: "token-mean"
+  kl_beta: 0.0
+  entropy_bonus: 0
+  clip_ratio_high: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 10.0
+  huber_delta: 10.0
+
+  # single transition per episode -> gamma/lambda are inert (no future step),
+  # the return is exactly the one-step reward.
+  gamma: 0.99
+  gae_lambda: 0.95
+
+  filter_rewards: False
+  rewards_lower_bound: 0.1
+  rewards_upper_bound: 0.9
+
+  sampling_params:
+    do_sample: True
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: False
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+
+env:
+  group_name: "EnvGroup"
+
+  train:
+    sim_backend: cpu
+    total_num_envs: 512        # 512 single-step transitions per global step
+    episodes: ["brush__brush__bowl__20230927_027"]
+    max_episode_steps: 1       # ONE control step per episode (single-step RL)
+    max_steps_per_rollout_epoch: 1
+    ignore_terminations: False
+    reward:
+      type: tracking
+      tool_pos_weight: 1.0     # objects only - hands are not rewarded
+      target_pos_weight: 1.0
+      hand_qpos_weight: 0.0
+      tool_pos_scale: 0.05
+      target_pos_scale: 0.05
+      hand_qpos_scale: 0.5
+      contact_weight: 0.0
+    single_step:
+      enabled: True
+      hand_obs_noise_std: 0.02   # Gaussian noise on every obs hand frame
+      perturb_init_hand: True    # offset the actual init hand too (compensation)
+      min_frame: 0
+    rsi:
+      enabled: False
+    early_termination:
+      enabled: False
+  eval: # unused (val_check_interval=-1) - kept for config schema
+    sim_backend: cpu
+    total_num_envs: 16
+    episodes: ["brush__brush__bowl__20230927_027"]
+    max_episode_steps: 1
+    max_steps_per_rollout_epoch: 1
+    single_step:
+      enabled: True
+      hand_obs_noise_std: 0.02
+      perturb_init_hand: True
+    group_size: 1
+    is_eval: True
+    seed: 1000
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  enable_offload: False
+  pipeline_stage_num: 1
+
+  model:
+    model_path: ${actor.model.model_path}
+    precision: ${actor.model.precision}
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 64
+  global_batch_size: 512 # = 512 envs x 1 single-step transition
+  seed: 42
+  enable_offload: False
+
+  model:
+    model_path: "/root/flow-policy/outputs/flow-policy/2026-06-10/18-12-14/checkpoints/epoch_800.pt"
+    random_init: False # RL fine-tuning from the IK-IL weights
+    num_action_chunks: 1 # execute exactly ONE action (single-step)
+    add_value_head: True
+    noise_method: "flow_sde"
+    noise_level: 0.5
+
+  optim:
+    lr: 1.0e-5
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 0.01
+    clip_grad: 1.0
+    critic_warmup_steps: 20 # value-head-only warmup before joint PPO updates
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False

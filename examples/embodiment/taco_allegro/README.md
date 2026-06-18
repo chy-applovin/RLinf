@@ -257,6 +257,43 @@ wandb: same project `taco-allegro-flow-rl`, run
 (new optional `runner.logger` keys wired into `MetricLogger`) documenting the
 full setup in the run page.
 
+### 2026-06-18 - single-step (contextual-bandit) RL + hand-obs noise (`taco_allegro_ppo_flow_single_step.yaml`)
+
+Episode-level RL of the IK-IL policy keeps failing (compounding error +
+off-manifold drift; every recipe above eventually hacks or stalls). New
+approach: drop episode-level RL entirely (NO RSI / NO early termination) and
+optimize a **one-transition** objective instead - see "Single-step
+(contextual-bandit) RL mode" below for the mechanism.
+
+- init from the IK-IL checkpoint `epoch_800.pt`; each of 512 envs samples one
+  demo timestep `t`, inits the full state to `q_t`, builds the To=16 obs window
+  from the **real** demo history `q_{t-15..t}` (the exact IL window), runs ONE
+  control step; **reward = next-frame OBJECT tracking vs `q_{t+1}`** (tool 1.0 +
+  target 1.0, normalized; **hand weight 0** -> objects only). The episode ends,
+  so the PPO return is exactly that single-step reward (verified: `reward` ==
+  `return` in the logs; GAE bootstrap is masked by the done).
+- **robustness augmentation**: iid Gaussian noise (std 0.02) is added to the
+  hand qpos of every obs frame; `perturb_init_hand: True` also offsets the
+  actual initial hand by the current-frame noise, so the hand genuinely starts
+  displaced and the policy must emit an action that still tracks the object
+  (not merely denoise its input).
+
+Calibration (`test_single_step.py`, GT-action = demo `q_{t+1}` as the action):
+the single-step setup is sound - replaying the GT action from `q_t` tracks the
+objects at **r 0.906** (tool/target err ~0.6 cm). Pure obs noise leaves the
+GT-action reward unchanged (0.912 @ std 0.02 - reward reads the true state, not
+the noised obs), while `perturb_init_hand=True` lowers the GT ceiling slightly
+(0.906 -> 0.878 @ std 0.02): the offset is real (it costs object tracking) yet
+recoverable (still 0.88), so std 0.02 is a meaningful-but-not-destructive
+perturbation. RL optimizes the gap between the IL policy's noised-obs behavior
+and this ceiling.
+
+Pipeline smoke (3 steps, 16 envs, 4 GPUs): clean; `reward`==`return`,
+`single_step_frame` logged, `approx_kl` ~8e-4. Full run: 512 envs/step,
+lr 1e-5 / value_lr 1e-4 (critic warmup 20), `num_action_chunks=1`, 1000 steps,
+ckpt every 200, GPUs 0-3. wandb run
+`single-step-rl-handnoise-1ep-brush_bowl` (notes/tags document the setup).
+
 ## DeepMimic training aids (config-gated, default off)
 
 Two techniques from DeepMimic (Peng et al. 2018), implemented in
@@ -289,7 +326,47 @@ Recipe with both enabled: `taco_allegro_ppo_flow_ilft_dm.yaml` (GPUs 4-7).
 NOTE (operational): RLinf joins an existing Ray cluster (`address="auto"`,
 fixed namespace and channel/actor-group names), so two trainings cannot run
 concurrently on one machine even on disjoint GPUs - launch the DM run after
-the current one finishes.
+the current one finishes. (Workaround used here: `RAY_ADDRESS=local` forces an
+isolated cluster per run.)
+
+## Single-step (contextual-bandit) RL mode (config-gated, default off)
+
+An alternative to episode-level RL for the IK-IL policy, implemented in
+`rlinf/envs/taco/single_step.py` with guarded hooks in the CPU env (flag off =>
+behavior identical to before; GPU backend asserts it off). Motivation:
+episode-level RL of this policy is hard - errors compound over the closed-loop
+rollout and the state drifts off the demo manifold, and the tracking reward is
+easy to hack (see the experiment record). Single-step RL sidesteps all of that
+by learning a one-transition map.
+
+Mechanism (`env.*.single_step.enabled`, use with `max_episode_steps: 1`,
+`max_steps_per_rollout_epoch: 1`, `actor.model.num_action_chunks: 1`; mutually
+exclusive with `rsi` / `early_termination`):
+
+* **reset** samples one demo timestep `t` (uniform in `[min_frame, T-2]`),
+  initializes the full sim state to the reference `q_t` (hand + objects), and
+  builds the To-frame observation window from the **real** demo frames
+  `q_{t-To+1..t}` (edge-padded) - the exact Diffusion-Policy window the IL
+  policy trained on (`action_offset=1`);
+* **one control step**, then the episode ends; the reward is the next-frame
+  tracking error vs `q_{t+1}`. Pair with an **object-only** tracking reward
+  (`reward.hand_qpos_weight: 0`) so only the objects are rewarded. Because the
+  episode is length 1, the PPO return equals that single reward - the value
+  head learns `E[reward | s]` as a pure baseline (no bootstrap; GAE's
+  `~dones[t+1]` masks the future).
+
+Hand-observation-noise robustness (`single_step.hand_obs_noise_std`): iid
+Gaussian noise is added to the hand qpos of **every** observation frame, so the
+policy learns a mapping that emits the object-correct action even when the
+observed hand pose is perturbed. `single_step.perturb_init_hand: True`
+additionally offsets the actual initial hand state by the current-frame noise
+(physical displacement to compensate, vs pure input noise to denoise).
+`single_step_frame` (sampled `t`) is logged per rollout.
+
+Tests: `examples/embodiment/taco_allegro/test_single_step.py` (no Ray) -
+timestep sampling/range, demo-window obs alignment, hand-noise (obs-only and
+init-perturb), single-step truncation + GT-action reward, default-off
+regression, and a GT-action reward calibration sweep.
 
 ## Simulator backends: CPU (default) vs GPU (MuJoCo Warp)
 

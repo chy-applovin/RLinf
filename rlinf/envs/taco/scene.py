@@ -64,6 +64,27 @@ def obj_pose(qpos_obj: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return qpos_obj[:3].copy(), quat2mat(qpos_obj[3:7])
 
 
+def synth_obs_frame(
+    qpos: np.ndarray, episode: "EpisodeData", need_tool: bool
+) -> dict[str, np.ndarray]:
+    """Synthesize one observation frame from a (58,) qpos vector.
+
+    Re-poses the canonical object-frame clouds with the object pose in ``qpos``
+    and slices the 44-dim hand qpos. Works for both the live sim state and any
+    demo frame, so the closed-loop obs (``_SubEnv.obs_frame``) and the
+    single-step demo-history obs share identical synthesis logic.
+    """
+    p, rot = obj_pose(qpos[TARGET_OBJ_QPOS])
+    frame = {
+        "pointcloud": (episode.target_local @ rot.T + p).astype(np.float32),
+        "qpos": qpos[:HAND_DIM].astype(np.float32).copy(),
+    }
+    if need_tool:
+        pr, rr = obj_pose(qpos[TOOL_OBJ_QPOS])
+        frame["tool_pointcloud"] = (episode.tool_local @ rr.T + pr).astype(np.float32)
+    return frame
+
+
 def farthest_point_indices(
     points: np.ndarray, num_points: int, rng: np.random.Generator
 ) -> np.ndarray:

@@ -54,9 +54,10 @@ from rlinf.envs.taco.scene import (
     TOOL_OBJ_QPOS,
     EpisodeData,
     load_episode_data,
-    obj_pose,
     select_episodes,
+    synth_obs_frame,
 )
+from rlinf.envs.taco.single_step import SingleStepSampler
 
 __all__ = ["TacoEnv"]
 
@@ -100,17 +101,7 @@ class _SubEnv:
 
     def obs_frame(self, need_tool: bool) -> dict[str, np.ndarray]:
         """Single-frame observation synthesized from the live sim state."""
-        p, rot = obj_pose(self.data.qpos[TARGET_OBJ_QPOS])
-        frame = {
-            "pointcloud": (self.episode.target_local @ rot.T + p).astype(np.float32),
-            "qpos": self.data.qpos[:HAND_DIM].astype(np.float32).copy(),
-        }
-        if need_tool:
-            pr, rr = obj_pose(self.data.qpos[TOOL_OBJ_QPOS])
-            frame["tool_pointcloud"] = (self.episode.tool_local @ rr.T + pr).astype(
-                np.float32
-            )
-        return frame
+        return synth_obs_frame(self.data.qpos, self.episode, need_tool)
 
 
 class TacoEnv(gym.Env):
@@ -213,6 +204,22 @@ class TacoEnv(gym.Env):
             )
         self._et_cache: dict[str, EarlyTermination] = {}
 
+        # ----------------------------------- single-step (bandit) RL (default off)
+        ss_cfg = cfg.get("single_step", None)
+        if ss_cfg is not None and OmegaConf.is_config(ss_cfg):
+            ss_cfg = OmegaConf.to_container(ss_cfg, resolve=True)
+        self.single_step = SingleStepSampler(ss_cfg, seed=self.seed + 2)
+        if self.single_step.enabled:
+            assert self.max_episode_steps == 1, (
+                "single_step RL runs exactly one control step per episode; "
+                "set env.*.max_episode_steps=1 (and max_steps_per_rollout_epoch=1, "
+                "actor.model.num_action_chunks=1)"
+            )
+            assert not self.rsi.enabled and not self.et_enabled, (
+                "single_step is mutually exclusive with the RSI / early-termination "
+                "episode-level aids (it samples its own per-step reference state)"
+            )
+
         # ------------------------------------------------------------- runtime
         self.video_cfg = cfg.video_cfg
         self._video_num_envs = int(cfg.get("video_num_envs", 4))
@@ -282,6 +289,8 @@ class TacoEnv(gym.Env):
         return self._et_cache[ep.name]
 
     def _make_subenv(self, episode_id: int) -> _SubEnv:
+        if self.single_step.enabled:
+            return self._make_single_step_subenv(episode_id)
         ep, model = self._get_episode(episode_id)
         # DeepMimic RSI: start from a randomly sampled reference frame
         start_frame = self.rsi.sample_start_frame(ep.num_frames)
@@ -301,6 +310,39 @@ class TacoEnv(gym.Env):
         )
         frame0 = sub.obs_frame(self.need_tool_cloud)
         sub.obs_hist = [frame0] * self.obs_horizon
+        return sub
+
+    def _make_single_step_subenv(self, episode_id: int) -> _SubEnv:
+        """One-transition env: init at a random demo frame t, run one step.
+
+        The full sim state is the reference ``q_t`` (objects always clean); the
+        To-frame obs window is the real demo history ``q_{t-To+1..t}`` with iid
+        Gaussian noise on every hand-qpos frame. ``perturb_init_hand`` also
+        offsets the physical initial hand by the current-frame noise. Reward
+        (one step later) tracks the OBJECTS vs ``q_{t+1}``.
+        """
+        ep, model = self._get_episode(episode_id)
+        t = self.single_step.sample_timestep(ep.num_frames)
+        noise = self.single_step.sample_hand_noise(self.obs_horizon)
+        data = mujoco.MjData(model)
+        data.qpos[:] = ep.qpos_demo[t]
+        if self.single_step.perturb_init_hand:
+            data.qpos[:HAND_DIM] += noise[-1]
+        data.qvel[:] = ep.qvel_demo[t]
+        mujoco.mj_forward(model, data)
+        substeps = max(1, round((1.0 / ep.frequency) / float(model.opt.timestep)))
+        ep_len = min(self.max_episode_steps, ep.num_frames - 1 - t)
+        sub = _SubEnv(
+            episode=ep,
+            model=model,
+            data=data,
+            substeps=substeps,
+            ep_len=ep_len,
+            start_frame=t,
+        )
+        sub.obs_hist = self.single_step.build_obs_history(
+            ep, t, self.obs_horizon, self.need_tool_cloud, noise
+        )
         return sub
 
     # ------------------------------------------------------------------- reset
@@ -490,6 +532,10 @@ class TacoEnv(gym.Env):
             )
         if self.rsi.enabled:
             metrics["rsi_start_frame"] = torch.tensor(
+                [float(sub.start_frame) for sub in self.subenvs]
+            )
+        if self.single_step.enabled:
+            metrics["single_step_frame"] = torch.tensor(
                 [float(sub.start_frame) for sub in self.subenvs]
             )
         return metrics
