@@ -32,8 +32,8 @@ runner:
       demo_start=False, RSI=False, ET=False. Horizon increases from 4 to 200 env
       control steps. actor.model.num_action_chunks=4, so the rollout worker requests
       ceil(horizon/4) action chunks. collect_current_horizon_only=True avoids old
-      fixed-envelope rollout waste; resample_valid_transitions=False plus
-      sample_to_global_batch_multiple=True resizes the collected valid chunk pool to
+      fixed-envelope rollout waste; sample_to_global_batch_multiple=True resizes
+      the collected valid chunk pool to
       the nearest global_batch_size multiple, so PPO updates per global step are about
       (#resized_chunks / global_batch_size) * update_epoch. Reward tracks objects and
       hand qpos throughout. GPUs 0-3.
@@ -122,7 +122,6 @@ env:
     horizon_curriculum:
       enabled: True
       collect_current_horizon_only: True
-      resample_valid_transitions: False
       sample_to_global_batch_multiple: True
       start_horizon: 4
       end_horizon: 200

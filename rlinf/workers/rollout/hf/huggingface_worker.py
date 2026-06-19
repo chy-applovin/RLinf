@@ -85,16 +85,9 @@ class MultiStepRolloutWorker(Worker):
         self.horizon_curriculum_enabled = bool(
             self.horizon_curriculum_cfg.get("enabled", False)
         )
-        self.curriculum_resample_valid_transitions = bool(
-            self.horizon_curriculum_enabled
-            and self.horizon_curriculum_cfg.get("resample_valid_transitions", True)
-        )
         self.curriculum_collect_current_horizon_only = bool(
             self.horizon_curriculum_enabled
-            and self.horizon_curriculum_cfg.get(
-                "collect_current_horizon_only",
-                self.horizon_curriculum_cfg.get("resample_valid_transitions", True),
-            )
+            and self.horizon_curriculum_cfg.get("collect_current_horizon_only", True)
         )
 
         weight_syncer_cfg = OmegaConf.select(cfg, "weight_syncer", default=None)

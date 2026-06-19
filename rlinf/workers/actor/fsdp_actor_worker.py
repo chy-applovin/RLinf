@@ -1187,23 +1187,13 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
     def _get_horizon_curriculum_cfg(self):
         return self.cfg.env.train.get("horizon_curriculum", None)
 
-    def _curriculum_resample_valid_transitions_enabled(self) -> bool:
-        horizon_cfg = self._get_horizon_curriculum_cfg()
-        if horizon_cfg is None:
-            return False
-        return bool(
-            horizon_cfg.get("enabled", False)
-            and horizon_cfg.get("resample_valid_transitions", True)
-        )
-
     def _curriculum_sample_to_global_batch_multiple_enabled(self) -> bool:
         horizon_cfg = self._get_horizon_curriculum_cfg()
         if horizon_cfg is None:
             return False
         return bool(
             horizon_cfg.get("enabled", False)
-            and horizon_cfg.get("sample_to_global_batch_multiple", False)
-            and not horizon_cfg.get("resample_valid_transitions", True)
+            and horizon_cfg.get("sample_to_global_batch_multiple", True)
         )
 
     def _curriculum_valid_transition_mask(
@@ -1232,12 +1222,8 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             return lower
         return upper
 
-    def _sample_curriculum_valid_transitions(
-        self,
-        rollout_batch: dict[str, torch.Tensor],
-        *,
-        target_size_per_rank: int | None = None,
-        target_global_batch_multiple: bool = False,
+    def _resize_curriculum_valid_transitions_to_batch_multiple(
+        self, rollout_batch: dict[str, torch.Tensor]
     ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
         ref = rollout_batch["prev_logprobs"]
         n_steps, batch_size = ref.shape[:2]
@@ -1249,11 +1235,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 "horizon_curriculum produced no valid transitions to sample from"
             )
 
-        if target_size_per_rank is None:
-            target_size_per_rank = self._nearest_global_batch_multiple_per_rank(
-                pool_size
-            )
-        target_size_per_rank = int(target_size_per_rank)
+        target_size_per_rank = self._nearest_global_batch_multiple_per_rank(pool_size)
         batch_size_per_rank = int(self.cfg.actor.global_batch_size) // int(
             self._world_size
         )
@@ -1326,9 +1308,7 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             "curriculum_sample_global_batch_multiple": float(
                 target_size_per_rank / batch_size_per_rank
             ),
-            "curriculum_sample_to_global_batch_multiple": float(
-                target_global_batch_multiple
-            ),
+            "curriculum_sample_to_global_batch_multiple": 1.0,
         }
         return sampled, metrics
 
@@ -1360,19 +1340,14 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch.update({"loss_mask_sum": kwargs["loss_mask_sum"]})
 
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
-        if self._curriculum_resample_valid_transitions_enabled():
-            target_size = int(self.cfg.actor.global_batch_size) // int(self._world_size)
-            sampled_batch, sample_metrics = self._sample_curriculum_valid_transitions(
-                self.rollout_batch, target_size_per_rank=target_size
+        if self._curriculum_sample_to_global_batch_multiple_enabled():
+            resized_batch, resize_metrics = (
+                self._resize_curriculum_valid_transitions_to_batch_multiple(
+                    self.rollout_batch
+                )
             )
-            self.rollout_batch = sampled_batch
-            rollout_metrics.update(sample_metrics)
-        elif self._curriculum_sample_to_global_batch_multiple_enabled():
-            sampled_batch, sample_metrics = self._sample_curriculum_valid_transitions(
-                self.rollout_batch, target_global_batch_multiple=True
-            )
-            self.rollout_batch = sampled_batch
-            rollout_metrics.update(sample_metrics)
+            self.rollout_batch = resized_batch
+            rollout_metrics.update(resize_metrics)
         return rollout_metrics
 
     def _build_sft_data_loader(self):

@@ -398,7 +398,6 @@ examples/embodiment/config/taco_allegro_ppo_flow_a4_step0_curriculum_hand.yaml
 - reset 不再从 demo 中随机采样 timestep，而是始终从 frame 0 开始。
 - `actor.model.num_action_chunks=4`，所以一次 policy inference 执行 4 个 env control steps。
 - `horizon_curriculum.collect_current_horizon_only=True`，rollout 只请求当前 horizon 所需 chunk 数。
-- `horizon_curriculum.resample_valid_transitions=False`，actor 不压成一个固定 batch。
 - `horizon_curriculum.sample_to_global_batch_multiple=True`，actor 在 advantage/return 计算之后，把有效 chunk pool resize 到最近的 `global_batch_size` 整数倍，再切成多个 PPO train batches。
 
 因此 A4 中每个 global step 的 optimizer update 次数不是固定 4，而是：

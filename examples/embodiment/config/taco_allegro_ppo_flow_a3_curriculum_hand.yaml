@@ -119,7 +119,7 @@ env:
     horizon_curriculum:
       enabled: True
       collect_current_horizon_only: True
-      resample_valid_transitions: True
+      sample_to_global_batch_multiple: True
       start_horizon: 1
       end_horizon: 32
       milestones:

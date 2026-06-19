@@ -150,16 +150,9 @@ class EnvWorker(Worker):
         self.horizon_curriculum_enabled = bool(
             self.horizon_curriculum_cfg.get("enabled", False)
         )
-        self.curriculum_resample_valid_transitions = bool(
-            self.horizon_curriculum_enabled
-            and self.horizon_curriculum_cfg.get("resample_valid_transitions", True)
-        )
         self.curriculum_collect_current_horizon_only = bool(
             self.horizon_curriculum_enabled
-            and self.horizon_curriculum_cfg.get(
-                "collect_current_horizon_only",
-                self.horizon_curriculum_cfg.get("resample_valid_transitions", True),
-            )
+            and self.horizon_curriculum_cfg.get("collect_current_horizon_only", True)
         )
         self.current_train_horizon_steps = (
             int(self.cfg.env.train.max_episode_steps) if not self.only_eval else 0
