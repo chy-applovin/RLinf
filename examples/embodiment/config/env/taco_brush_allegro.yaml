@@ -98,6 +98,29 @@ single_step:
   perturb_init_hand: False
   min_frame: 0 # never sample t below this demo frame
 
+# -------------------------------- demo-start short-horizon curriculum RL (off)
+# Like single_step, reset samples a demo timestep t and initializes to q_t with
+# the demo-history obs window. Unlike single_step, the rollout horizon can be
+# >1 and may be changed by EnvWorker's horizon_curriculum below. CPU backend only.
+demo_start:
+  enabled: False
+  hand_obs_noise_std: 0.0
+  perturb_init_hand: False
+  min_frame: 0
+
+# EnvWorker-side effective horizon schedule. Keep max_episode_steps and
+# max_steps_per_rollout_epoch set to the largest horizon; when enabled, this
+# schedule lowers the per-reset episode cap early in training and logs
+# env/curriculum_horizon_steps.
+horizon_curriculum:
+  enabled: False
+  # When enabled, collect only the current curriculum horizon instead of the
+  # max rollout horizon, then sample valid transitions up to actor.global_batch_size.
+  resample_valid_transitions: True
+  start_horizon: 1
+  end_horizon: ${env.train.max_episode_steps}
+  milestones: []
+
 # ------------------------------------------------------------------- video
 # Offscreen rendering needs a working GL backend (e.g. MUJOCO_GL=glfw + xvfb).
 video_cfg:

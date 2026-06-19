@@ -57,7 +57,7 @@ from rlinf.envs.taco.scene import (
     select_episodes,
     synth_obs_frame,
 )
-from rlinf.envs.taco.single_step import SingleStepSampler
+from rlinf.envs.taco.single_step import DemoTimestepSampler, SingleStepSampler
 
 __all__ = ["TacoEnv"]
 
@@ -204,20 +204,33 @@ class TacoEnv(gym.Env):
             )
         self._et_cache: dict[str, EarlyTermination] = {}
 
-        # ----------------------------------- single-step (bandit) RL (default off)
+        # ----------------------- demo-timestep starts / single-step RL (default off)
         ss_cfg = cfg.get("single_step", None)
         if ss_cfg is not None and OmegaConf.is_config(ss_cfg):
             ss_cfg = OmegaConf.to_container(ss_cfg, resolve=True)
         self.single_step = SingleStepSampler(ss_cfg, seed=self.seed + 2)
+
+        demo_start_cfg = cfg.get("demo_start", None)
+        if demo_start_cfg is not None and OmegaConf.is_config(demo_start_cfg):
+            demo_start_cfg = OmegaConf.to_container(demo_start_cfg, resolve=True)
+        self.demo_start = DemoTimestepSampler(demo_start_cfg, seed=self.seed + 3)
+        assert not (self.single_step.enabled and self.demo_start.enabled), (
+            "single_step and demo_start are mutually exclusive; use single_step "
+            "for one-transition RL and demo_start for short-horizon curriculum RL"
+        )
+        self._demo_timestep_sampler = (
+            self.single_step if self.single_step.enabled else self.demo_start
+        )
         if self.single_step.enabled:
             assert self.max_episode_steps == 1, (
                 "single_step RL runs exactly one control step per episode; "
                 "set env.*.max_episode_steps=1 (and max_steps_per_rollout_epoch=1, "
                 "actor.model.num_action_chunks=1)"
             )
+        if self._demo_timestep_sampler.enabled:
             assert not self.rsi.enabled and not self.et_enabled, (
-                "single_step is mutually exclusive with the RSI / early-termination "
-                "episode-level aids (it samples its own per-step reference state)"
+                "demo-timestep sampling is mutually exclusive with RSI / "
+                "early-termination; it samples its own reference start state"
             )
 
         # ------------------------------------------------------------- runtime
@@ -289,8 +302,8 @@ class TacoEnv(gym.Env):
         return self._et_cache[ep.name]
 
     def _make_subenv(self, episode_id: int) -> _SubEnv:
-        if self.single_step.enabled:
-            return self._make_single_step_subenv(episode_id)
+        if self._demo_timestep_sampler.enabled:
+            return self._make_demo_timestep_subenv(episode_id)
         ep, model = self._get_episode(episode_id)
         # DeepMimic RSI: start from a randomly sampled reference frame
         start_frame = self.rsi.sample_start_frame(ep.num_frames)
@@ -312,21 +325,23 @@ class TacoEnv(gym.Env):
         sub.obs_hist = [frame0] * self.obs_horizon
         return sub
 
-    def _make_single_step_subenv(self, episode_id: int) -> _SubEnv:
-        """One-transition env: init at a random demo frame t, run one step.
+    def _make_demo_timestep_subenv(self, episode_id: int) -> _SubEnv:
+        """Init at a sampled demo frame and run the configured horizon.
 
         The full sim state is the reference ``q_t`` (objects always clean); the
         To-frame obs window is the real demo history ``q_{t-To+1..t}`` with iid
         Gaussian noise on every hand-qpos frame. ``perturb_init_hand`` also
-        offsets the physical initial hand by the current-frame noise. Reward
-        (one step later) tracks the OBJECTS vs ``q_{t+1}``.
+        offsets the physical initial hand by the current-frame noise. With
+        ``single_step.enabled`` the horizon is one; with ``demo_start.enabled``
+        the horizon may be increased by EnvWorker's curriculum.
         """
+        sampler = self._demo_timestep_sampler
         ep, model = self._get_episode(episode_id)
-        t = self.single_step.sample_timestep(ep.num_frames)
-        noise = self.single_step.sample_hand_noise(self.obs_horizon)
+        t = sampler.sample_timestep(ep.num_frames, horizon_steps=self.max_episode_steps)
+        noise = sampler.sample_hand_noise(self.obs_horizon)
         data = mujoco.MjData(model)
         data.qpos[:] = ep.qpos_demo[t]
-        if self.single_step.perturb_init_hand:
+        if sampler.perturb_init_hand:
             data.qpos[:HAND_DIM] += noise[-1]
         data.qvel[:] = ep.qvel_demo[t]
         mujoco.mj_forward(model, data)
@@ -340,7 +355,7 @@ class TacoEnv(gym.Env):
             ep_len=ep_len,
             start_frame=t,
         )
-        sub.obs_hist = self.single_step.build_obs_history(
+        sub.obs_hist = sampler.build_obs_history(
             ep, t, self.obs_horizon, self.need_tool_cloud, noise
         )
         return sub
@@ -370,7 +385,10 @@ class TacoEnv(gym.Env):
             mujoco.mj_step(sub.model, sub.data)
         sub.steps += 1
         reward, info = self.reward_fn.compute(sub)
-        sub.obs_hist.append(sub.obs_frame(self.need_tool_cloud))
+        obs_frame = sub.obs_frame(self.need_tool_cloud)
+        if self._demo_timestep_sampler.enabled:
+            obs_frame = self._demo_timestep_sampler.noise_obs_frame(obs_frame)
+        sub.obs_hist.append(obs_frame)
         # keep history bounded
         if len(sub.obs_hist) > self.obs_horizon:
             del sub.obs_hist[: -self.obs_horizon]
@@ -532,6 +550,10 @@ class TacoEnv(gym.Env):
             )
         if self.rsi.enabled:
             metrics["rsi_start_frame"] = torch.tensor(
+                [float(sub.start_frame) for sub in self.subenvs]
+            )
+        if self.demo_start.enabled:
+            metrics["demo_start_frame"] = torch.tensor(
                 [float(sub.start_frame) for sub in self.subenvs]
             )
         if self.single_step.enabled:

@@ -79,7 +79,16 @@ class MultiStepRolloutWorker(Worker):
         )
         self.collect_prev_infos = self.cfg.rollout.get("collect_prev_infos", True)
         self.version = 0
+        self.global_step = 0
         self.finished_episodes = None
+        self.horizon_curriculum_cfg = self._get_horizon_curriculum_cfg()
+        self.horizon_curriculum_enabled = bool(
+            self.horizon_curriculum_cfg.get("enabled", False)
+        )
+        self.curriculum_resample_valid_transitions = bool(
+            self.horizon_curriculum_enabled
+            and self.horizon_curriculum_cfg.get("resample_valid_transitions", True)
+        )
 
         weight_syncer_cfg = OmegaConf.select(cfg, "weight_syncer", default=None)
         assert weight_syncer_cfg is not None, (
@@ -392,10 +401,51 @@ class MultiStepRolloutWorker(Worker):
         gc.collect()
         self.torch_platform.empty_cache()
 
+    def _get_horizon_curriculum_cfg(self) -> dict[str, Any]:
+        raw = self.cfg.env.train.get("horizon_curriculum", None)
+        if raw is None:
+            return {}
+        if OmegaConf.is_config(raw):
+            return OmegaConf.to_container(raw, resolve=True)
+        return dict(raw)
+
+    def _compute_curriculum_horizon(self) -> int:
+        max_horizon = int(self.cfg.env.train.max_episode_steps)
+        max_rollout = int(self.cfg.env.train.max_steps_per_rollout_epoch)
+        if not self.horizon_curriculum_enabled:
+            return max_horizon
+
+        cfg = self.horizon_curriculum_cfg
+        start_horizon = int(cfg.get("start_horizon", 1))
+        end_horizon = int(cfg.get("end_horizon", max_horizon))
+        horizon = start_horizon
+
+        milestones = cfg.get("milestones", None)
+        if milestones:
+            for item in sorted(milestones, key=lambda x: int(x.get("step", 0))):
+                if self.global_step >= int(item.get("step", 0)):
+                    horizon = int(item.get("horizon", horizon))
+        else:
+            start_step = int(cfg.get("start_step", 0))
+            ramp_steps = max(1, int(cfg.get("ramp_steps", 1)))
+            progress = min(1.0, max(0.0, (self.global_step - start_step) / ramp_steps))
+            horizon = int(round(start_horizon + progress * (end_horizon - start_horizon)))
+
+        return max(1, min(int(horizon), end_horizon, max_horizon, max_rollout))
+
+    def _get_train_chunk_steps_for_current_horizon(self) -> int:
+        if not self.curriculum_resample_valid_transitions:
+            return self.n_train_chunk_steps
+        chunk_size = max(1, int(self.cfg.actor.model.num_action_chunks))
+        horizon = self._compute_curriculum_horizon()
+        chunk_steps = (horizon + chunk_size - 1) // chunk_size
+        return max(1, min(self.n_train_chunk_steps, chunk_steps))
+
     @Worker.timer("generate_one_epoch")
     async def generate_one_epoch(self, input_channel: Channel, output_channel: Channel):
         self.update_dagger_beta()
-        for _ in range(self.n_train_chunk_steps):
+        train_chunk_steps = self._get_train_chunk_steps_for_current_horizon()
+        for _ in range(train_chunk_steps):
             for _ in range(self.num_pipeline_stages):
                 env_output = await self.recv_env_output(input_channel)
                 actions, result = self.predict(env_output["obs"])
@@ -689,5 +739,6 @@ class MultiStepRolloutWorker(Worker):
             )
 
     def set_global_step(self, global_step: int):
-        if hasattr(self.hf_model, "set_global_step"):
+        self.global_step = int(global_step)
+        if hasattr(self, "hf_model") and hasattr(self.hf_model, "set_global_step"):
             self.hf_model.set_global_step(global_step)

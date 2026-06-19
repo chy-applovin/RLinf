@@ -1184,6 +1184,88 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         return rollout_batch
 
+    def _curriculum_resample_valid_transitions_enabled(self) -> bool:
+        horizon_cfg = self.cfg.env.train.get("horizon_curriculum", None)
+        if horizon_cfg is None:
+            return False
+        return bool(
+            horizon_cfg.get("enabled", False)
+            and horizon_cfg.get("resample_valid_transitions", True)
+        )
+
+    def _curriculum_valid_transition_mask(
+        self, rollout_batch: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        ref = rollout_batch["prev_logprobs"]
+        n_steps, batch_size = ref.shape[:2]
+        loss_mask = rollout_batch.get("loss_mask", None)
+        if loss_mask is None:
+            return torch.ones(n_steps, batch_size, dtype=torch.bool, device=ref.device)
+
+        valid = loss_mask
+        while valid.dim() > 2:
+            valid = valid.any(dim=-1)
+        return valid.to(dtype=torch.bool, device=ref.device)
+
+    def _sample_curriculum_valid_transitions(
+        self, rollout_batch: dict[str, torch.Tensor]
+    ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
+        ref = rollout_batch["prev_logprobs"]
+        n_steps, batch_size = ref.shape[:2]
+        valid = self._curriculum_valid_transition_mask(rollout_batch)
+        flat_valid = valid.reshape(-1).nonzero(as_tuple=False).flatten().cpu()
+        pool_size = int(flat_valid.numel())
+        if pool_size <= 0:
+            raise RuntimeError(
+                "horizon_curriculum produced no valid transitions to sample from"
+            )
+
+        target_size = int(self.cfg.actor.global_batch_size) // int(self._world_size)
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(
+            int(self.cfg.actor.seed)
+            + 1000003 * int(getattr(self, "version", 0))
+            + 9176 * int(self._rank)
+        )
+        if pool_size >= target_size:
+            chosen = flat_valid[torch.randperm(pool_size, generator=generator)[:target_size]]
+            replacement = False
+        else:
+            chosen = flat_valid[
+                torch.randint(pool_size, (target_size,), generator=generator)
+            ]
+            replacement = True
+
+        time_idx = (chosen // batch_size).to(device=ref.device, dtype=torch.long)
+        batch_idx = (chosen % batch_size).to(device=ref.device, dtype=torch.long)
+        bootstrap_keys = {"dones", "terminations", "truncations", "prev_values"}
+
+        def sample_value(key: str, value):
+            if isinstance(value, dict):
+                return {sub_key: sample_value(sub_key, sub_value) for sub_key, sub_value in value.items()}
+            if not isinstance(value, torch.Tensor):
+                return value
+            if value.dim() < 2 or value.shape[1] != batch_size:
+                return value
+            if key in bootstrap_keys and value.shape[0] == n_steps + 1:
+                current = value[time_idx, batch_idx]
+                nxt = value[time_idx + 1, batch_idx]
+                return torch.stack((current, nxt), dim=0).contiguous()
+            if value.shape[0] == n_steps:
+                return value[time_idx, batch_idx].unsqueeze(0).contiguous()
+            return value
+
+        sampled = {key: sample_value(key, value) for key, value in rollout_batch.items()}
+        metrics = {
+            "curriculum_transition_pool_size": float(pool_size * int(self._world_size)),
+            "curriculum_transition_pool_size_per_rank": float(pool_size),
+            "curriculum_sampled_batch_size": float(target_size * int(self._world_size)),
+            "curriculum_sampled_batch_size_per_rank": float(target_size),
+            "curriculum_sample_with_replacement": float(replacement),
+            "curriculum_sample_reuse_ratio": float(target_size / pool_size),
+        }
+        return sampled, metrics
+
     @Worker.timer("actor/compute_adv")
     def compute_advantages_and_returns(self) -> dict[str, torch.Tensor]:
         """
@@ -1212,6 +1294,12 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             self.rollout_batch.update({"loss_mask_sum": kwargs["loss_mask_sum"]})
 
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
+        if self._curriculum_resample_valid_transitions_enabled():
+            sampled_batch, sample_metrics = self._sample_curriculum_valid_transitions(
+                self.rollout_batch
+            )
+            self.rollout_batch = sampled_batch
+            rollout_metrics.update(sample_metrics)
         return rollout_metrics
 
     def _build_sft_data_loader(self):

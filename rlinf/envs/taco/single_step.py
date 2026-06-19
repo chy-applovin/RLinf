@@ -12,20 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Single-step (one-transition) RL sampling for the TACO env.
+"""Demo-timestep sampling for one-step or short-horizon TACO RL.
 
 Episode-level RL of the IK-imitation flow policy is hard: errors compound over
 the rollout and the closed-loop state drifts off the demo manifold. This module
-implements a much simpler contextual-bandit alternative:
+implements a simpler alternative that starts rollouts from a sampled demo frame:
 
 * sample one demo timestep ``t`` per env (uniformly over the trajectory);
 * initialize the full sim state to the reference frame ``q_t`` (hand + objects),
   and build the To-frame observation window from the REAL demo frames
   ``q_{t-To+1..t}`` (edge-padded at the start), exactly the window the IL policy
   was trained on (Diffusion-Policy convention, ``action_offset=1``);
-* run EXACTLY ONE control step; the reward is the next-frame OBJECT tracking
-  error vs ``q_{t+1}`` (hands are not rewarded). The episode then ends, so the
-  return is just that single-step reward (GAE bootstrap is masked by the done).
+* run either exactly one control step (contextual-bandit mode) or a short
+  curriculum-controlled horizon from that sampled frame.
 
 Robustness augmentation (the point of this scheme): independent Gaussian noise
 ``epsilon`` is added to the hand qpos of every observation frame
@@ -37,11 +36,12 @@ and the policy must compensate rather than merely denoise its input.
 
 Config-gated (default OFF) and isolated here + small guarded hooks in
 ``TacoEnv``; with the flag off the env behaves exactly as before. Mutually
-exclusive with RSI / early termination (those are episode-level aids).
+exclusive with RSI / early termination (those are separate episode-level aids).
 """
 
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -51,11 +51,11 @@ from rlinf.envs.taco.scene import HAND_DIM, synth_obs_frame
 if TYPE_CHECKING:
     from rlinf.envs.taco.scene import EpisodeData
 
-__all__ = ["SingleStepSampler"]
+__all__ = ["DemoTimestepSampler", "SingleStepSampler"]
 
 
-class SingleStepSampler:
-    """Samples per-reset (timestep, hand-noise) and builds the demo-history obs."""
+class DemoTimestepSampler:
+    """Samples per-reset (timestep, hand-noise) and builds demo-history obs."""
 
     def __init__(self, cfg: dict[str, Any] | None, seed: int):
         cfg = dict(cfg) if cfg else {}
@@ -68,20 +68,24 @@ class SingleStepSampler:
         # never sample below this demo frame (skip the static pre-motion frames)
         self.min_frame = int(cfg.get("min_frame", 0))
         self._rng = np.random.default_rng(seed)
+        self._rng_lock = threading.Lock()
 
-    def sample_timestep(self, num_frames: int) -> int:
-        """Uniform t in [min_frame, T-2] (need frame t+1 for the reward target)."""
-        hi = num_frames - 2
+    def sample_timestep(self, num_frames: int, horizon_steps: int = 1) -> int:
+        """Uniform t with enough remaining demo frames for the rollout target."""
+        horizon_steps = max(1, int(horizon_steps))
+        hi = num_frames - 1 - horizon_steps
         lo = min(max(self.min_frame, 0), max(hi, 0))
-        return int(self._rng.integers(lo, hi + 1))
+        with self._rng_lock:
+            return int(self._rng.integers(lo, hi + 1))
 
     def sample_hand_noise(self, obs_horizon: int) -> np.ndarray:
         """(To, HAND_DIM) iid Gaussian hand-qpos noise; zeros when std <= 0."""
         if self.hand_obs_noise_std <= 0.0:
             return np.zeros((obs_horizon, HAND_DIM), dtype=np.float64)
-        return self._rng.normal(
-            0.0, self.hand_obs_noise_std, size=(obs_horizon, HAND_DIM)
-        )
+        with self._rng_lock:
+            return self._rng.normal(
+                0.0, self.hand_obs_noise_std, size=(obs_horizon, HAND_DIM)
+            )
 
     def build_obs_history(
         self,
@@ -104,3 +108,17 @@ class SingleStepSampler:
             frame["qpos"] = (frame["qpos"] + noise[k]).astype(np.float32)
             hist.append(frame)
         return hist
+
+    def noise_obs_frame(self, frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """Return a copy of one live obs frame with fresh hand-qpos obs noise."""
+        if self.hand_obs_noise_std <= 0.0:
+            return frame
+        noised = dict(frame)
+        with self._rng_lock:
+            noise = self._rng.normal(0.0, self.hand_obs_noise_std, size=(HAND_DIM,))
+        noised["qpos"] = (noised["qpos"] + noise).astype(np.float32)
+        return noised
+
+
+# Backward-compatible name used by the existing single-step TacoEnv hook.
+SingleStepSampler = DemoTimestepSampler

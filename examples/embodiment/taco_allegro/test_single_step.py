@@ -191,6 +191,58 @@ def test_single_step_done_and_reward():
     )
 
 
+def ds(**ds_over):
+    base = {
+        "enabled": True,
+        "hand_obs_noise_std": 0.0,
+        "perturb_init_hand": False,
+        "min_frame": 0,
+    }
+    base.update(ds_over)
+    return base
+
+
+def test_demo_start_multistep_done_and_reward():
+    """demo_start samples t like single_step, but can run a short horizon."""
+    n = 12
+    horizon = 3
+    env = build(
+        make_cfg(
+            max_episode_steps=horizon,
+            max_steps_per_rollout_epoch=horizon,
+            single_step=ss(enabled=False),
+            demo_start=ds(),
+        ),
+        n,
+    )
+    env.reset()
+    demo = env.subenvs[0].episode.qpos_demo
+    acts = np.stack(
+        [
+            demo[
+                np.arange(s.start_frame + 1, s.start_frame + horizon + 1),
+                :HAND_DIM,
+            ]
+            for s in env.subenvs
+        ]
+    )
+    _, rew, term, trunc, infos = env.chunk_step(acts)
+    assert rew.shape == (n, horizon)
+    assert trunc[:, -1].all(), "demo_start horizon must truncate every env"
+    assert not trunc[:, :-1].any(), "chunk-level truncation is reported on the chunk tail"
+    assert not term.any(), "demo_start horizon truncates; it does not terminate"
+    assert all(s.steps == horizon and s.done for s in env.subenvs)
+    ep = infos[-1]["episode"]
+    assert "demo_start_frame" in ep
+    assert "single_step_frame" not in ep
+    assert rew.mean().item() > 0.6, f"GT-action demo_start reward too low: {rew.mean():.3f}"
+    env.close()
+    print(
+        f"[5] demo-start multistep: OK (horizon={horizon}, "
+        f"GT-action r/step {rew.mean():.3f})"
+    )
+
+
 def test_default_off_regression():
     """single_step.enabled=False -> original episode behavior (frame-0 repeat)."""
     env = build(make_cfg(max_episode_steps=160, single_step=ss(enabled=False)), 2)
@@ -203,7 +255,7 @@ def test_default_off_regression():
             assert np.allclose(frame["qpos"], demo[0, :HAND_DIM], atol=1e-5)
     assert "single_step_frame" not in env._episode_metrics()
     env.close()
-    print("[5] default-off regression: OK (start_frame=0, frame-0 history)")
+    print("[6] default-off regression: OK (start_frame=0, frame-0 history)")
 
 
 def calibrate_gt_reward():
@@ -238,6 +290,7 @@ if __name__ == "__main__":
     test_hand_noise()
     test_perturb_init_hand()
     test_single_step_done_and_reward()
+    test_demo_start_multistep_done_and_reward()
     test_default_off_regression()
     calibrate_gt_reward()
-    print("ALL SINGLE-STEP TESTS PASSED")
+    print("ALL SINGLE-STEP / DEMO-START TESTS PASSED")

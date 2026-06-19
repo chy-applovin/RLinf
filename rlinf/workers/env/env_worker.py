@@ -68,6 +68,7 @@ class EnvWorker(Worker):
         self.last_intervened_info_list = []
         self._prefetched_train_bootstrap: list[EnvOutput] | None = None
         self.rollout_epoch = self.cfg.algorithm.get("rollout_epoch", 1)
+        self.global_step = 0
         self._component_placement = HybridComponentPlacement(cfg, Cluster())
 
         self.collect_transitions = self.cfg.rollout.get("collect_transitions", False)
@@ -144,6 +145,83 @@ class EnvWorker(Worker):
                 torch.zeros(self.eval_num_envs_per_stage, dtype=torch.bool)
                 for _ in range(self.stage_num)
             ]
+
+        self.horizon_curriculum_cfg = self._get_horizon_curriculum_cfg()
+        self.horizon_curriculum_enabled = bool(
+            self.horizon_curriculum_cfg.get("enabled", False)
+        )
+        self.curriculum_resample_valid_transitions = bool(
+            self.horizon_curriculum_enabled
+            and self.horizon_curriculum_cfg.get("resample_valid_transitions", True)
+        )
+        self.current_train_horizon_steps = (
+            int(self.cfg.env.train.max_episode_steps) if not self.only_eval else 0
+        )
+
+    def set_global_step(self, global_step: int) -> None:
+        """Set the runner step used by horizon-curriculum schedules."""
+        self.global_step = int(global_step)
+
+    def _get_horizon_curriculum_cfg(self) -> dict[str, Any]:
+        if self.only_eval:
+            return {}
+        raw = self.cfg.env.train.get("horizon_curriculum", None)
+        if raw is None:
+            return {}
+        if OmegaConf.is_config(raw):
+            return OmegaConf.to_container(raw, resolve=True)
+        return dict(raw)
+
+    def _compute_curriculum_horizon(self) -> int:
+        max_horizon = int(self.cfg.env.train.max_episode_steps)
+        max_rollout = int(self.cfg.env.train.max_steps_per_rollout_epoch)
+        if not self.horizon_curriculum_enabled:
+            return max_horizon
+
+        cfg = self.horizon_curriculum_cfg
+        start_horizon = int(cfg.get("start_horizon", 1))
+        end_horizon = int(cfg.get("end_horizon", max_horizon))
+        horizon = start_horizon
+
+        milestones = cfg.get("milestones", None)
+        if milestones:
+            for item in sorted(milestones, key=lambda x: int(x.get("step", 0))):
+                if self.global_step >= int(item.get("step", 0)):
+                    horizon = int(item.get("horizon", horizon))
+        else:
+            start_step = int(cfg.get("start_step", 0))
+            ramp_steps = max(1, int(cfg.get("ramp_steps", 1)))
+            progress = min(1.0, max(0.0, (self.global_step - start_step) / ramp_steps))
+            horizon = int(round(start_horizon + progress * (end_horizon - start_horizon)))
+
+        return max(1, min(int(horizon), max_horizon, max_rollout))
+
+    @staticmethod
+    def _set_env_max_episode_steps(env, horizon_steps: int) -> None:
+        target = env
+        while target is not None:
+            if hasattr(target, "max_episode_steps"):
+                setattr(target, "max_episode_steps", int(horizon_steps))
+                return
+            target = getattr(target, "env", None)
+        raise AttributeError(
+            f"{type(env).__name__} has no max_episode_steps attribute for curriculum"
+        )
+
+    def _apply_horizon_curriculum(self) -> int:
+        horizon = self._compute_curriculum_horizon()
+        self.current_train_horizon_steps = horizon
+        if self.horizon_curriculum_enabled:
+            for env in self.env_list:
+                self._set_env_max_episode_steps(env, horizon)
+        return horizon
+
+    def _get_train_chunk_steps_for_current_horizon(self) -> int:
+        if not self.curriculum_resample_valid_transitions:
+            return self.n_train_chunk_steps
+        chunk_size = max(1, int(self.cfg.actor.model.num_action_chunks))
+        chunk_steps = (int(self.current_train_horizon_steps) + chunk_size - 1) // chunk_size
+        return max(1, min(self.n_train_chunk_steps, chunk_steps))
 
     def init_worker(self):
         self.dst_rank_map = self._setup_dst_rank_map()
@@ -996,6 +1074,7 @@ class EnvWorker(Worker):
             )
 
     def _bootstrap_and_send_train(self, rollout_channel: Channel) -> list[EnvOutput]:
+        self._apply_horizon_curriculum()
         env_outputs = self.bootstrap_step()
         self._send_train_bootstrap(rollout_channel, env_outputs)
         return env_outputs
@@ -1049,6 +1128,7 @@ class EnvWorker(Worker):
         *,
         cooperative_yield: bool,
     ) -> dict[str, torch.Tensor]:
+        current_horizon = self._apply_horizon_curriculum()
         self.rollout_results: list[EmbodiedRolloutResult] = [
             EmbodiedRolloutResult(
                 max_episode_length=self.cfg.env.train.max_episode_steps,
@@ -1056,6 +1136,30 @@ class EnvWorker(Worker):
             for _ in range(self.stage_num)
         ]
         env_metrics = defaultdict(list)
+        train_chunk_steps = self._get_train_chunk_steps_for_current_horizon()
+        if self.horizon_curriculum_enabled:
+            for _ in range(self.stage_num):
+                env_metrics["curriculum_horizon_steps"].append(
+                    torch.full(
+                        (self.train_num_envs_per_stage,),
+                        float(current_horizon),
+                        dtype=torch.float32,
+                    )
+                )
+                env_metrics["curriculum_rollout_chunk_steps"].append(
+                    torch.full(
+                        (self.train_num_envs_per_stage,),
+                        float(train_chunk_steps),
+                        dtype=torch.float32,
+                    )
+                )
+                env_metrics["curriculum_transition_pool_size"].append(
+                    torch.full(
+                        (self.train_num_envs_per_stage,),
+                        float(current_horizon * self.cfg.env.train.total_num_envs),
+                        dtype=torch.float32,
+                    )
+                )
 
         for epoch in range(self.rollout_epoch):
             if epoch == 0 and self._prefetched_train_bootstrap is not None:
@@ -1064,7 +1168,7 @@ class EnvWorker(Worker):
             else:
                 env_outputs = self._bootstrap_and_send_train(rollout_channel)
 
-            for chunk_step_idx in range(self.n_train_chunk_steps):
+            for chunk_step_idx in range(train_chunk_steps):
                 for stage_id in range(self.stage_num):
                     if cooperative_yield:
                         await asyncio.sleep(0)
@@ -1152,7 +1256,7 @@ class EnvWorker(Worker):
                     should_record = (
                         self.cfg.env.train.auto_reset
                         or self.cfg.env.train.ignore_terminations
-                        or chunk_step_idx == self.n_train_chunk_steps - 1
+                        or chunk_step_idx == train_chunk_steps - 1
                     )
                     if should_record:
                         self.record_env_metrics(env_metrics, env_info)
