@@ -89,6 +89,13 @@ class MultiStepRolloutWorker(Worker):
             self.horizon_curriculum_enabled
             and self.horizon_curriculum_cfg.get("resample_valid_transitions", True)
         )
+        self.curriculum_collect_current_horizon_only = bool(
+            self.horizon_curriculum_enabled
+            and self.horizon_curriculum_cfg.get(
+                "collect_current_horizon_only",
+                self.horizon_curriculum_cfg.get("resample_valid_transitions", True),
+            )
+        )
 
         weight_syncer_cfg = OmegaConf.select(cfg, "weight_syncer", default=None)
         assert weight_syncer_cfg is not None, (
@@ -434,7 +441,7 @@ class MultiStepRolloutWorker(Worker):
         return max(1, min(int(horizon), end_horizon, max_horizon, max_rollout))
 
     def _get_train_chunk_steps_for_current_horizon(self) -> int:
-        if not self.curriculum_resample_valid_transitions:
+        if not self.curriculum_collect_current_horizon_only:
             return self.n_train_chunk_steps
         chunk_size = max(1, int(self.cfg.actor.model.num_action_chunks))
         horizon = self._compute_curriculum_horizon()

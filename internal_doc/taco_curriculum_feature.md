@@ -35,7 +35,9 @@ demo_start:
 
 horizon_curriculum:
   enabled: True
+  collect_current_horizon_only: True
   resample_valid_transitions: True
+  sample_to_global_batch_multiple: False
   start_horizon: 1
   end_horizon: 32
   milestones:
@@ -82,21 +84,60 @@ horizon_curriculum:
 
 开启 horizon schedule。当前 global step 对应的 horizon 由 milestones 或线性 ramp 决定。
 
-### horizon_curriculum.resample_valid_transitions
+### horizon_curriculum.collect_current_horizon_only
 
-开启 efficient curriculum sampling。该功能是当前推荐路径。
+控制 rollout 阶段是否只收集当前 curriculum horizon。该开关只影响 env/rollout 的时间长度，不决定 actor 是否重采样。
 
 若为 true：
 
-- env / rollout 只执行当前 curriculum horizon 对应的 chunk 数。
-- actor 在计算 advantage/return 后，从有效 transition pool 中采样到固定 `actor.global_batch_size`。
-- 避免旧实现中 done 后仍然请求 action/logprob/value 的无效 rollout 计算。
+- env episode cap 被设成当前 horizon。
+- rollout worker 只请求 `ceil(current_horizon / num_action_chunks)` 次 policy inference。
+- 前期短 horizon 不会继续请求 max horizon 后面的无效 action/logprob/value。
 
 若为 false：
 
-- 使用旧 fixed-envelope 行为。
-- env episode cap 会随 curriculum 变短，但 rollout worker 仍按 `max_steps_per_rollout_epoch` 请求满 rollout。
-- done 后的 transition 通过 loss mask 变成无效，但 action/logprob/value forward 仍然发生。
+- 复现旧 fixed-envelope 行为。
+- env episode cap 可以变短，但 rollout worker 仍按 `max_steps_per_rollout_epoch` 请求满 rollout。
+- done 后 transition 通过 loss mask 排除，但 rollout/training forward 仍可能浪费。
+
+为了兼容旧配置，若没有显式写该字段，它默认跟随 `resample_valid_transitions`：旧 A2/A3 的 `resample_valid_transitions=True` 会自动进入动态收集路径；旧的 `resample_valid_transitions=False` 配置仍保持 fixed-envelope。
+
+### horizon_curriculum.resample_valid_transitions
+
+控制 actor 在 advantage/return 计算之后是否把有效 transition pool 重采样成一个固定 `actor.global_batch_size`。
+
+若为 true：
+
+- actor 从有效 transition pool 中采样到固定 `actor.global_batch_size`。
+- 每个 global step 通常只训练一个 global batch，因此 optimizer updates/global step 通常等于 `update_epoch`。
+- pool 不足时会 replacement sampling，并记录 reuse ratio。
+
+若为 false：
+
+- actor 不强制压成一个 train global batch。
+- 若 `sample_to_global_batch_multiple=True`，actor 会把有效 transition pool resize 到最近的 `actor.global_batch_size` 整数倍。
+- 若 `sample_to_global_batch_multiple=False`，actor 保留全部收集 transition，此时 pool 必须已经能被 `global_batch_size` 整除。
+
+### horizon_curriculum.sample_to_global_batch_multiple
+
+仅在 `resample_valid_transitions=False` 时使用。它解决的是 PPO dataloader 的形状约束，而不是 rollout 阶段的 horizon 问题。
+
+执行逻辑：
+
+1. rollout 按当前 curriculum horizon 收集真实 transition pool。
+2. actor 先在原始 pool 上计算 advantage/return。
+3. 统计有效 transition 数 `pool_size`。
+4. 找到距离 `pool_size` 最近的 `actor.global_batch_size` 整数倍。
+5. 若目标小于 pool，则无放回下采样；若目标大于 pool，则有放回补齐。
+6. actor 按 `global_batch_size` 切分为一个或多个 train global batches。
+
+因此每个 global step 的 optimizer updates 约为：
+
+```text
+updates_per_global_step = update_epoch * resized_pool_size / global_batch_size
+```
+
+这比“每个 global step 必须 rollout 出恰好一个 global_batch_size”更自然；rollout 只由当前 curriculum horizon 决定。
 
 ### start_horizon / end_horizon
 
@@ -399,3 +440,49 @@ reuse ratio = 32
 - A3：`demo_start.enabled=True`，`horizon_curriculum.enabled=True`，object + hand reward。
 
 若已经有旧代码启动的 A2/A3 进程，修改代码不会影响正在运行的进程。要使用 efficient curriculum sampling，需要重启训练或从最新 checkpoint resume。
+
+
+## 11. Step0 Full-Pool Curriculum (A4)
+
+A4 不是 demo-start：`single_step.enabled=False`、`demo_start.enabled=False`、`rsi.enabled=False`、`early_termination.enabled=False`。在 TACO env 中 RSI 关闭时，reset sampler 返回 frame 0，因此每个 rollout 都从 demo 的 step0 初始状态开始。
+
+A4 使用的 curriculum 组合是：
+
+```yaml
+horizon_curriculum:
+  enabled: True
+  collect_current_horizon_only: True
+  resample_valid_transitions: False
+  sample_to_global_batch_multiple: True
+  start_horizon: 4
+  end_horizon: 200
+```
+
+执行顺序：
+
+1. 根据 global step 计算当前 horizon，例如 `4 -> 8 -> 16 -> 32 -> 64 -> 128 -> 200`。
+2. Env worker 把每个 env 的 `max_episode_steps` 改成当前 horizon。
+3. Rollout worker 请求 `ceil(horizon / num_action_chunks)` 个 action chunks；A4 中 `num_action_chunks=4`。
+4. Env 从 step0 开始真实执行到当前 horizon，不从中间 demo timestep 初始化。
+5. Actor 对所有收集到的 chunks 先计算 advantage/return。
+6. 因为 `resample_valid_transitions=False` 且 `sample_to_global_batch_multiple=True`，actor 不采样成一个固定 batch，而是把有效 chunks resize 到最近的 `actor.global_batch_size` 整数倍。
+7. Actor 按 `actor.global_batch_size` 分成一个或多个 global batches。每个 global step 的 optimizer update 次数约为：
+
+```text
+updates_per_global_step = (resized_chunks / global_batch_size) * update_epoch
+```
+
+例如 A4 默认：
+
+```text
+total_num_envs = 128
+num_action_chunks = 4
+global_batch_size = 128
+update_epoch = 4
+horizon = 64
+collected_chunks = 128 * ceil(64 / 4) = 2048
+resized_chunks = 2048  # already a global_batch_size multiple
+updates_per_global_step = (2048 / 128) * 4 = 64
+```
+
+该模式避免了 fixed-envelope rollout 浪费，同时不会像 A2/A3 一样把 pool 重采样成单个固定 batch；代价是 horizon 变长后每个 global step 的 update 次数会显著增加。

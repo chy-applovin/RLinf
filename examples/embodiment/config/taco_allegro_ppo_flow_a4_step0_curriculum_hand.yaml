@@ -16,31 +16,34 @@ hydra:
 cluster:
   num_nodes: 1
   component_placement:
-    actor,env,rollout: 4-5
+    actor,env,rollout: 0-3
 
 runner:
   task_type: embodied
   logger:
     log_path: "../results"
     project_name: taco-allegro-flow-rl
-    experiment_name: "a3-demo-start-curriculum-object-hand-10k-1ep-brush_bowl"
+    experiment_name: "a4-step0-curriculum-object-hand-h4to200-chunk4-gbs128-1ep-brush_bowl"
     logger_backends: ["wandb", "tensorboard"]
-    wandb_tags: ["A3", "demo-start", "curriculum", "object-hand-tracking", "hand-obs-noise", "10k"]
+    wandb_tags: ["A4", "step0", "curriculum", "object-hand-tracking", "chunk4", "full-pool"]
     wandb_notes: |
-      A3: A1 + A2 combined. Each env samples a random demo timestep t and initializes
-      to q_t; the effective rollout horizon follows the same 1->32 step milestone curriculum
-      as A2, with rollout workers only requesting the current horizon's chunk count and
-      actor-side fixed-batch valid-transition sampling. Reward tracks objects and hand qpos
-      (tool 1.0 + target 1.0 + hand 0.5,
-      normalized) throughout training. Hand obs noise std 0.02 with perturb_init_hand=True.
-      10000 training steps, save every 1000, GPUs 4-5.
+      A4: step0 curriculum RL from the IK-IL flow-policy checkpoint epoch_800.pt.
+      Unlike A2/A3, train reset always starts from demo frame 0: single_step=False,
+      demo_start=False, RSI=False, ET=False. Horizon increases from 4 to 200 env
+      control steps. actor.model.num_action_chunks=4, so the rollout worker requests
+      ceil(horizon/4) action chunks. collect_current_horizon_only=True avoids old
+      fixed-envelope rollout waste; resample_valid_transitions=False plus
+      sample_to_global_batch_multiple=True resizes the collected valid chunk pool to
+      the nearest global_batch_size multiple, so PPO updates per global step are about
+      (#resized_chunks / global_batch_size) * update_epoch. Reward tracks objects and
+      hand qpos throughout. GPUs 0-3.
 
-  max_epochs: 10000
+  max_epochs: 5000
   max_steps: -1
 
   only_eval: False
   val_check_interval: -1
-  save_interval: 1000
+  save_interval: 500
 
   resume_dir: null
   ckpt_path: null
@@ -97,8 +100,8 @@ env:
     sim_backend: cpu
     total_num_envs: 128
     episodes: ["brush__brush__bowl__20230927_027"]
-    max_episode_steps: 32
-    max_steps_per_rollout_epoch: 32
+    max_episode_steps: 200
+    max_steps_per_rollout_epoch: 200
     ignore_terminations: False
     reward:
       type: tracking
@@ -112,29 +115,32 @@ env:
     single_step:
       enabled: False
     demo_start:
-      enabled: True
-      hand_obs_noise_std: 0.02
-      perturb_init_hand: True
+      enabled: False
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: False
       min_frame: 0
     horizon_curriculum:
       enabled: True
       collect_current_horizon_only: True
-      resample_valid_transitions: True
-      start_horizon: 1
-      end_horizon: 32
+      resample_valid_transitions: False
+      sample_to_global_batch_multiple: True
+      start_horizon: 4
+      end_horizon: 200
       milestones:
         - step: 0
-          horizon: 1
-        - step: 1000
-          horizon: 2
-        - step: 2500
           horizon: 4
-        - step: 4500
+        - step: 500
           horizon: 8
-        - step: 7000
+        - step: 1000
           horizon: 16
-        - step: 9000
+        - step: 1800
           horizon: 32
+        - step: 2800
+          horizon: 64
+        - step: 3800
+          horizon: 128
+        - step: 4500
+          horizon: 200
     rsi:
       enabled: False
     early_termination:
@@ -143,8 +149,8 @@ env:
     sim_backend: cpu
     total_num_envs: 16
     episodes: ["brush__brush__bowl__20230927_027"]
-    max_episode_steps: 32
-    max_steps_per_rollout_epoch: 32
+    max_episode_steps: 200
+    max_steps_per_rollout_epoch: 200
     reward:
       type: tracking
       tool_pos_weight: 1.0
@@ -157,9 +163,9 @@ env:
     single_step:
       enabled: False
     demo_start:
-      enabled: True
-      hand_obs_noise_std: 0.02
-      perturb_init_hand: True
+      enabled: False
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: False
       min_frame: 0
     group_size: 1
     is_eval: True
@@ -178,15 +184,15 @@ rollout:
 actor:
   group_name: "ActorGroup"
   training_backend: "fsdp"
-  micro_batch_size: 64
-  global_batch_size: 4096
+  micro_batch_size: 16
+  global_batch_size: 128
   seed: 42
   enable_offload: False
 
   model:
     model_path: "/root/flow-policy/outputs/flow-policy/2026-06-10/18-12-14/checkpoints/epoch_800.pt"
     random_init: False
-    num_action_chunks: 1
+    num_action_chunks: 4
     add_value_head: True
     noise_method: "flow_sde"
     noise_level: 0.5

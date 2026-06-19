@@ -115,8 +115,14 @@ demo_start:
 horizon_curriculum:
   enabled: False
   # When enabled, collect only the current curriculum horizon instead of the
-  # max rollout horizon, then sample valid transitions up to actor.global_batch_size.
+  # max rollout horizon. Disable only to reproduce the old fixed-envelope path.
+  collect_current_horizon_only: True
+  # When true, actor samples one fixed actor.global_batch_size batch from the
+  # collected valid transitions after advantage/return computation.
   resample_valid_transitions: True
+  # Used when resample_valid_transitions=False: resize the valid transition pool
+  # to the nearest actor.global_batch_size multiple before PPO updates.
+  sample_to_global_batch_multiple: False
   start_horizon: 1
   end_horizon: ${env.train.max_episode_steps}
   milestones: []

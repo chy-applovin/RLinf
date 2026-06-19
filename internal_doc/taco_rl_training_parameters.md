@@ -383,3 +383,47 @@ micro batch 是 gradient accumulation 的切分单位。多个 micro batch 累�
 ### action chunk 不是 global batch
 
 action chunk 属于 rollout/env 时间维度，global batch 属于 actor training 样本维度。二者独立。
+
+
+## 8. Step0 Full-Pool Curriculum 的训练计数
+
+A4 配置：
+
+```text
+examples/embodiment/config/taco_allegro_ppo_flow_a4_step0_curriculum_hand.yaml
+```
+
+关键区别：
+
+- reset 不再从 demo 中随机采样 timestep，而是始终从 frame 0 开始。
+- `actor.model.num_action_chunks=4`，所以一次 policy inference 执行 4 个 env control steps。
+- `horizon_curriculum.collect_current_horizon_only=True`，rollout 只请求当前 horizon 所需 chunk 数。
+- `horizon_curriculum.resample_valid_transitions=False`，actor 不压成一个固定 batch。
+- `horizon_curriculum.sample_to_global_batch_multiple=True`，actor 在 advantage/return 计算之后，把有效 chunk pool resize 到最近的 `global_batch_size` 整数倍，再切成多个 PPO train batches。
+
+因此 A4 中每个 global step 的 optimizer update 次数不是固定 4，而是：
+
+```text
+optimizer updates / global step
+= update_epoch * (resized_valid_chunks / global_batch_size)
+```
+
+默认值：
+
+```text
+total_num_envs = 128
+num_action_chunks = 4
+global_batch_size = 128
+update_epoch = 4
+```
+
+所以：
+
+```text
+horizon 4   -> collected chunks 128  -> 4 optimizer updates / global step
+horizon 32  -> collected chunks 1024 -> 32 optimizer updates / global step
+horizon 64  -> collected chunks 2048 -> 64 optimizer updates / global step
+horizon 200 -> collected chunks 6400 -> 200 optimizer updates / global step
+```
+
+这个设计与 A2/A3 的 fixed-size resampling 不同：A2/A3 固定为一个 `global_batch_size` 后再训练，A4 则让 horizon 越长时每个 global step 消耗越多真实收集到的 on-policy chunks。这里的关键不是 rollout 必须产生恰好一个 `global_batch_size`，而是 training 前的有效 pool 需要能被 `global_batch_size` 切分。

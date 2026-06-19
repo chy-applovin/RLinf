@@ -1184,13 +1184,26 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         return rollout_batch
 
+    def _get_horizon_curriculum_cfg(self):
+        return self.cfg.env.train.get("horizon_curriculum", None)
+
     def _curriculum_resample_valid_transitions_enabled(self) -> bool:
-        horizon_cfg = self.cfg.env.train.get("horizon_curriculum", None)
+        horizon_cfg = self._get_horizon_curriculum_cfg()
         if horizon_cfg is None:
             return False
         return bool(
             horizon_cfg.get("enabled", False)
             and horizon_cfg.get("resample_valid_transitions", True)
+        )
+
+    def _curriculum_sample_to_global_batch_multiple_enabled(self) -> bool:
+        horizon_cfg = self._get_horizon_curriculum_cfg()
+        if horizon_cfg is None:
+            return False
+        return bool(
+            horizon_cfg.get("enabled", False)
+            and horizon_cfg.get("sample_to_global_batch_multiple", False)
+            and not horizon_cfg.get("resample_valid_transitions", True)
         )
 
     def _curriculum_valid_transition_mask(
@@ -1207,8 +1220,24 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             valid = valid.any(dim=-1)
         return valid.to(dtype=torch.bool, device=ref.device)
 
+    def _nearest_global_batch_multiple_per_rank(self, pool_size: int) -> int:
+        batch_size_per_rank = int(self.cfg.actor.global_batch_size) // int(
+            self._world_size
+        )
+        lower = (pool_size // batch_size_per_rank) * batch_size_per_rank
+        upper = lower + batch_size_per_rank
+        if lower <= 0:
+            return upper
+        if pool_size - lower <= upper - pool_size:
+            return lower
+        return upper
+
     def _sample_curriculum_valid_transitions(
-        self, rollout_batch: dict[str, torch.Tensor]
+        self,
+        rollout_batch: dict[str, torch.Tensor],
+        *,
+        target_size_per_rank: int | None = None,
+        target_global_batch_multiple: bool = False,
     ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
         ref = rollout_batch["prev_logprobs"]
         n_steps, batch_size = ref.shape[:2]
@@ -1220,49 +1249,86 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
                 "horizon_curriculum produced no valid transitions to sample from"
             )
 
-        target_size = int(self.cfg.actor.global_batch_size) // int(self._world_size)
-        generator = torch.Generator(device="cpu")
-        generator.manual_seed(
-            int(self.cfg.actor.seed)
-            + 1000003 * int(getattr(self, "version", 0))
-            + 9176 * int(self._rank)
+        if target_size_per_rank is None:
+            target_size_per_rank = self._nearest_global_batch_multiple_per_rank(
+                pool_size
+            )
+        target_size_per_rank = int(target_size_per_rank)
+        batch_size_per_rank = int(self.cfg.actor.global_batch_size) // int(
+            self._world_size
         )
-        if pool_size >= target_size:
-            chosen = flat_valid[torch.randperm(pool_size, generator=generator)[:target_size]]
-            replacement = False
+        if target_size_per_rank % batch_size_per_rank != 0:
+            raise ValueError(
+                "curriculum target_size_per_rank must be a multiple of "
+                f"global_batch_size/world_size, got {target_size_per_rank} and "
+                f"{batch_size_per_rank}"
+            )
+
+        replacement = pool_size < target_size_per_rank
+        all_positions_are_valid = pool_size == n_steps * batch_size
+        if target_size_per_rank == pool_size and all_positions_are_valid:
+            sampled = rollout_batch
         else:
-            chosen = flat_valid[
-                torch.randint(pool_size, (target_size,), generator=generator)
-            ]
-            replacement = True
+            generator = torch.Generator(device="cpu")
+            generator.manual_seed(
+                int(self.cfg.actor.seed)
+                + 1000003 * int(getattr(self, "version", 0))
+                + 9176 * int(self._rank)
+            )
+            if pool_size >= target_size_per_rank:
+                if pool_size == target_size_per_rank:
+                    chosen = flat_valid
+                else:
+                    perm = torch.randperm(pool_size, generator=generator)
+                    chosen = flat_valid[perm[:target_size_per_rank]]
+            else:
+                chosen = flat_valid[
+                    torch.randint(
+                        pool_size, (target_size_per_rank,), generator=generator
+                    )
+                ]
 
-        time_idx = (chosen // batch_size).to(device=ref.device, dtype=torch.long)
-        batch_idx = (chosen % batch_size).to(device=ref.device, dtype=torch.long)
-        bootstrap_keys = {"dones", "terminations", "truncations", "prev_values"}
+            time_idx = (chosen // batch_size).to(device=ref.device, dtype=torch.long)
+            batch_idx = (chosen % batch_size).to(device=ref.device, dtype=torch.long)
+            bootstrap_keys = {"dones", "terminations", "truncations", "prev_values"}
 
-        def sample_value(key: str, value):
-            if isinstance(value, dict):
-                return {sub_key: sample_value(sub_key, sub_value) for sub_key, sub_value in value.items()}
-            if not isinstance(value, torch.Tensor):
+            def sample_value(key: str, value):
+                if isinstance(value, dict):
+                    return {
+                        sub_key: sample_value(sub_key, sub_value)
+                        for sub_key, sub_value in value.items()
+                    }
+                if not isinstance(value, torch.Tensor):
+                    return value
+                if value.dim() < 2 or value.shape[1] != batch_size:
+                    return value
+                if key in bootstrap_keys and value.shape[0] == n_steps + 1:
+                    current = value[time_idx, batch_idx]
+                    nxt = value[time_idx + 1, batch_idx]
+                    return torch.stack((current, nxt), dim=0).contiguous()
+                if value.shape[0] == n_steps:
+                    return value[time_idx, batch_idx].unsqueeze(0).contiguous()
                 return value
-            if value.dim() < 2 or value.shape[1] != batch_size:
-                return value
-            if key in bootstrap_keys and value.shape[0] == n_steps + 1:
-                current = value[time_idx, batch_idx]
-                nxt = value[time_idx + 1, batch_idx]
-                return torch.stack((current, nxt), dim=0).contiguous()
-            if value.shape[0] == n_steps:
-                return value[time_idx, batch_idx].unsqueeze(0).contiguous()
-            return value
 
-        sampled = {key: sample_value(key, value) for key, value in rollout_batch.items()}
+            sampled = {
+                key: sample_value(key, value) for key, value in rollout_batch.items()
+            }
+
         metrics = {
             "curriculum_transition_pool_size": float(pool_size * int(self._world_size)),
             "curriculum_transition_pool_size_per_rank": float(pool_size),
-            "curriculum_sampled_batch_size": float(target_size * int(self._world_size)),
-            "curriculum_sampled_batch_size_per_rank": float(target_size),
+            "curriculum_sampled_batch_size": float(
+                target_size_per_rank * int(self._world_size)
+            ),
+            "curriculum_sampled_batch_size_per_rank": float(target_size_per_rank),
             "curriculum_sample_with_replacement": float(replacement),
-            "curriculum_sample_reuse_ratio": float(target_size / pool_size),
+            "curriculum_sample_reuse_ratio": float(target_size_per_rank / pool_size),
+            "curriculum_sample_global_batch_multiple": float(
+                target_size_per_rank / batch_size_per_rank
+            ),
+            "curriculum_sample_to_global_batch_multiple": float(
+                target_global_batch_multiple
+            ),
         }
         return sampled, metrics
 
@@ -1295,8 +1361,15 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
 
         rollout_metrics = compute_rollout_metrics(self.rollout_batch)
         if self._curriculum_resample_valid_transitions_enabled():
+            target_size = int(self.cfg.actor.global_batch_size) // int(self._world_size)
             sampled_batch, sample_metrics = self._sample_curriculum_valid_transitions(
-                self.rollout_batch
+                self.rollout_batch, target_size_per_rank=target_size
+            )
+            self.rollout_batch = sampled_batch
+            rollout_metrics.update(sample_metrics)
+        elif self._curriculum_sample_to_global_batch_multiple_enabled():
+            sampled_batch, sample_metrics = self._sample_curriculum_valid_transitions(
+                self.rollout_batch, target_global_batch_multiple=True
             )
             self.rollout_batch = sampled_batch
             rollout_metrics.update(sample_metrics)

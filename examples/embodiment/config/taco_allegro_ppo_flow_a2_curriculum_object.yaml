@@ -29,9 +29,10 @@ runner:
     wandb_notes: |
       A2: demo-start curriculum RL from the IK-IL flow-policy checkpoint epoch_800.pt.
       Each env still samples a random demo timestep t and initializes to q_t. The effective
-      rollout horizon starts at 1 step and increases by milestones to 32 steps while the
-      batch tensor keeps the max horizon; done/loss_mask makes post-horizon padding inert.
-      Reward tracks objects only (tool 1.0 + target 1.0, hand 0.0). Hand obs noise std
+      rollout horizon starts at 1 step and increases by milestones to 32 steps. The
+      rollout workers only request the current horizon's chunk count, then the actor samples
+      one fixed global batch from valid transitions after advantage computation. Reward
+      tracks objects only (tool 1.0 + target 1.0, hand 0.0). Hand obs noise std
       0.02 with perturb_init_hand=True. 10000 training steps, save every 1000, GPUs 2-3.
 
   max_epochs: 10000
@@ -117,6 +118,7 @@ env:
       min_frame: 0
     horizon_curriculum:
       enabled: True
+      collect_current_horizon_only: True
       resample_valid_transitions: True
       start_horizon: 1
       end_horizon: 32

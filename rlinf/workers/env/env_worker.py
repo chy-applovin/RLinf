@@ -154,6 +154,13 @@ class EnvWorker(Worker):
             self.horizon_curriculum_enabled
             and self.horizon_curriculum_cfg.get("resample_valid_transitions", True)
         )
+        self.curriculum_collect_current_horizon_only = bool(
+            self.horizon_curriculum_enabled
+            and self.horizon_curriculum_cfg.get(
+                "collect_current_horizon_only",
+                self.horizon_curriculum_cfg.get("resample_valid_transitions", True),
+            )
+        )
         self.current_train_horizon_steps = (
             int(self.cfg.env.train.max_episode_steps) if not self.only_eval else 0
         )
@@ -217,7 +224,7 @@ class EnvWorker(Worker):
         return horizon
 
     def _get_train_chunk_steps_for_current_horizon(self) -> int:
-        if not self.curriculum_resample_valid_transitions:
+        if not self.curriculum_collect_current_horizon_only:
             return self.n_train_chunk_steps
         chunk_size = max(1, int(self.cfg.actor.model.num_action_chunks))
         chunk_steps = (int(self.current_train_horizon_steps) + chunk_size - 1) // chunk_size
