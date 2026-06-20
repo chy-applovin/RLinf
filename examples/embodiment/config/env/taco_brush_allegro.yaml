@@ -121,6 +121,10 @@ horizon_curriculum:
   # multiple after advantage/return computation, so PPO can split it into one or
   # more train global batches without coupling rollout size to batch size.
   sample_to_global_batch_multiple: True
+  # Optional cap on PPO train global batches consumed from one rollout pool.
+  # null means use the whole resized pool; integer M means sample at most
+  # M * actor.global_batch_size transitions per global step.
+  max_train_global_batches_per_step: null
   start_horizon: 1
   end_horizon: ${env.train.max_episode_steps}
   milestones: []

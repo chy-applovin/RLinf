@@ -1,0 +1,219 @@
+defaults:
+  - env/taco_brush_allegro@env.train
+  - env/taco_brush_allegro@env.eval
+  - model/flow_policy_taco@actor.model
+  - training_backend/fsdp@actor.fsdp_config
+  - weight_syncer/patch_syncer@weight_syncer
+  - override hydra/job_logging: stdout
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+    - file://${oc.env:EMBODIED_PATH}/config/
+
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: 0-1
+
+runner:
+  task_type: embodied
+  logger:
+    log_path: "../results"
+    project_name: taco-allegro-flow-rl
+    experiment_name: "r01-cap8-ue1-step0-h4to200-chunk4-gbs128-brush_bowl"
+    logger_backends: ["wandb", "tensorboard"]
+    wandb_tags: ["R01", "step0", "curriculum", "cap8", "update_epoch1", "object-hand-tracking", "chunk4"]
+    wandb_notes: |
+      Round 01 E1: cap PPO training to 8 global batches per rollout pool and use update_epoch=1. Tests whether A4 failure was caused by too many PPO updates per global step.
+      Reset always starts from demo frame 0; horizon curriculum runs 4->200 control
+      steps with action chunk=4. collect_current_horizon_only=True avoids fixed-envelope
+      rollout waste. sample_to_global_batch_multiple=True keeps PPO minibatch splitting
+      valid, and max_train_global_batches_per_step=8 caps train updates without
+      changing rollout collection. Reward tracks both objects and hand qpos. GPUs 0-1.
+
+  max_epochs: 5000
+  max_steps: -1
+
+  only_eval: False
+  val_check_interval: -1
+  save_interval: 500
+
+  resume_dir: null
+  ckpt_path: null
+
+algorithm:
+  normalize_advantages: True
+  kl_penalty: kl
+  group_size: 1
+  reward_coef: 1.0
+
+  rollout_epoch: 1
+  eval_rollout_epoch: 1
+
+  reward_type: chunk_level
+  logprob_type: token_level
+  entropy_type: token_level
+
+  update_epoch: 1
+  adv_type: gae
+  loss_type: actor_critic
+  loss_agg_func: "token-mean"
+  kl_beta: 0.0
+  entropy_bonus: 0
+  clip_ratio_high: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 10.0
+  huber_delta: 10.0
+
+  gamma: 0.99
+  gae_lambda: 0.95
+
+  filter_rewards: False
+  rewards_lower_bound: 0.1
+  rewards_upper_bound: 0.9
+
+  sampling_params:
+    do_sample: True
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: False
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+
+env:
+  group_name: "EnvGroup"
+
+  train:
+    sim_backend: cpu
+    total_num_envs: 128
+    episodes: ["brush__brush__bowl__20230927_027"]
+    max_episode_steps: 200
+    max_steps_per_rollout_epoch: 200
+    ignore_terminations: False
+    reward:
+      type: tracking
+      tool_pos_weight: 1.0
+      target_pos_weight: 1.0
+      hand_qpos_weight: 0.5
+      tool_pos_scale: 0.05
+      target_pos_scale: 0.05
+      hand_qpos_scale: 0.5
+      contact_weight: 0.0
+    single_step:
+      enabled: False
+    demo_start:
+      enabled: False
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: False
+      min_frame: 0
+    horizon_curriculum:
+      enabled: True
+      collect_current_horizon_only: True
+      sample_to_global_batch_multiple: True
+      max_train_global_batches_per_step: 8
+      start_horizon: 4
+      end_horizon: 200
+      milestones:
+        - step: 0
+          horizon: 4
+        - step: 500
+          horizon: 8
+        - step: 1000
+          horizon: 16
+        - step: 1800
+          horizon: 32
+        - step: 2800
+          horizon: 64
+        - step: 3800
+          horizon: 128
+        - step: 4500
+          horizon: 200
+    rsi:
+      enabled: False
+    early_termination:
+      enabled: False
+  eval:
+    sim_backend: cpu
+    total_num_envs: 16
+    episodes: ["brush__brush__bowl__20230927_027"]
+    max_episode_steps: 200
+    max_steps_per_rollout_epoch: 200
+    reward:
+      type: tracking
+      tool_pos_weight: 1.0
+      target_pos_weight: 1.0
+      hand_qpos_weight: 0.5
+      tool_pos_scale: 0.05
+      target_pos_scale: 0.05
+      hand_qpos_scale: 0.5
+      contact_weight: 0.0
+    single_step:
+      enabled: False
+    demo_start:
+      enabled: False
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: False
+      min_frame: 0
+    group_size: 1
+    is_eval: True
+    seed: 1000
+
+rollout:
+  group_name: "RolloutGroup"
+  generation_backend: "huggingface"
+  enable_offload: False
+  pipeline_stage_num: 1
+
+  model:
+    model_path: ${actor.model.model_path}
+    precision: ${actor.model.precision}
+
+actor:
+  group_name: "ActorGroup"
+  training_backend: "fsdp"
+  micro_batch_size: 16
+  global_batch_size: 128
+  seed: 42
+  enable_offload: False
+
+  model:
+    model_path: "/root/flow-policy/outputs/flow-policy/2026-06-10/18-12-14/checkpoints/epoch_800.pt"
+    random_init: False
+    num_action_chunks: 4
+    add_value_head: True
+    noise_method: "flow_sde"
+    noise_level: 0.5
+
+  optim:
+    lr: 1.0e-5
+    value_lr: 1.0e-4
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 0.01
+    clip_grad: 1.0
+    critic_warmup_steps: 20
+
+  fsdp_config:
+    strategy: "fsdp"
+    sharding_strategy: "no_shard"
+    gradient_checkpointing: False
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+
+reward:
+  use_reward_model: False
+
+critic:
+  use_critic_model: False

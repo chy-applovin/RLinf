@@ -147,16 +147,15 @@ global_batch_size / actor_world_size / micro_batch_size
 
 ```text
 optimizer update 次数 / global step
-= update_epoch * ceil_or_split(rollout_train_samples / global_batch_size)
+= update_epoch * num_train_global_batches
+
+num_train_global_batches
+= train_samples_after_optional_sampling / global_batch_size
 ```
 
-当前 TACO configs 和 efficient curriculum sampling 路径会让 actor 每个 global step 收到刚好一个 `global_batch_size` 的训练 batch。因此：
+其中 `train_samples_after_optional_sampling` 不必等于 rollout 收集到的样本数。对于 curriculum：rollout 先按当前 horizon 收集真实 pool，actor 计算 advantage/return 后再把 pool resize 到 `global_batch_size` 的整数倍；若配置了 `horizon_curriculum.max_train_global_batches_per_step=M`，则最多保留 `M` 个 train global batches。
 
-```text
-optimizer update 次数 / global step = update_epoch = 4
-```
-
-但每次 optimizer update 内部仍然包含多个 micro batch 的 forward/backward。
+因此每次 global step 的 optimizer update 次数可能随 horizon 变化，也可以被 cap 限制；它并不由 `global_batch_size` 单独决定。每次 optimizer update 内部仍然包含多个 micro batch 的 forward/backward。
 
 以 A2/A3 为例：
 
@@ -425,4 +424,15 @@ horizon 64  -> collected chunks 2048 -> 64 optimizer updates / global step
 horizon 200 -> collected chunks 6400 -> 200 optimizer updates / global step
 ```
 
-这个设计与 A2/A3 的 fixed-size resampling 不同：A2/A3 固定为一个 `global_batch_size` 后再训练，A4 则让 horizon 越长时每个 global step 消耗越多真实收集到的 on-policy chunks。这里的关键不是 rollout 必须产生恰好一个 `global_batch_size`，而是 training 前的有效 pool 需要能被 `global_batch_size` 切分。
+这个设计的关键不是 rollout 必须产生恰好一个 `global_batch_size`，而是 training 前的有效 pool 需要能被 `global_batch_size` 切分。A4 未设置 cap 时会使用几乎完整的 long-horizon pool，所以 horizon 越长，每个 global step 的 PPO update 越多。
+
+新的 R01 配置增加：
+
+```yaml
+horizon_curriculum:
+  max_train_global_batches_per_step: 8  # 或 16
+algorithm:
+  update_epoch: 1
+```
+
+这样仍然按当前 horizon 收集完整 rollout pool，但进入 PPO 的 train global batches 被限制到最多 8 或 16 个。以 horizon=200 为例，收集到的 chunks 仍是 6400；若 cap=8、`global_batch_size=128`、`update_epoch=1`，则每个 global step 只做 8 次 optimizer update，而不是 A4 的 200 次。

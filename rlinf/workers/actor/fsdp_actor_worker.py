@@ -1222,6 +1222,21 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             return lower
         return upper
 
+    def _curriculum_max_train_global_batches_per_step(self) -> int | None:
+        horizon_cfg = self._get_horizon_curriculum_cfg()
+        if horizon_cfg is None or not horizon_cfg.get("enabled", False):
+            return None
+        value = horizon_cfg.get("max_train_global_batches_per_step", None)
+        if value is None:
+            return None
+        value = int(value)
+        if value <= 0:
+            raise ValueError(
+                "horizon_curriculum.max_train_global_batches_per_step must be "
+                f"positive when set, got {value}"
+            )
+        return value
+
     def _resize_curriculum_valid_transitions_to_batch_multiple(
         self, rollout_batch: dict[str, torch.Tensor]
     ) -> tuple[dict[str, torch.Tensor], dict[str, float]]:
@@ -1239,6 +1254,11 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
         batch_size_per_rank = int(self.cfg.actor.global_batch_size) // int(
             self._world_size
         )
+        max_global_batches = self._curriculum_max_train_global_batches_per_step()
+        if max_global_batches is not None:
+            target_size_per_rank = min(
+                target_size_per_rank, max_global_batches * batch_size_per_rank
+            )
         if target_size_per_rank % batch_size_per_rank != 0:
             raise ValueError(
                 "curriculum target_size_per_rank must be a multiple of "
@@ -1310,6 +1330,10 @@ class EmbodiedFSDPActor(FSDPModelManager, Worker):
             ),
             "curriculum_sample_to_global_batch_multiple": 1.0,
         }
+        if max_global_batches is not None:
+            metrics["curriculum_max_train_global_batches_per_step"] = float(
+                max_global_batches
+            )
         return sampled, metrics
 
     @Worker.timer("actor/compute_adv")

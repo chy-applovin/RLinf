@@ -1,0 +1,324 @@
+env:
+  train:
+    env_type: taco
+    sim_backend: cpu
+    gpu_cuda_graph: true
+    gpu_nconmax_per_env: 100
+    gpu_njmax_per_env: 350
+    dataset_root: /root/Data/taco-brush-allegro
+    allegro_assets_root: /root/Spider/spider/assets/robots/allegro/assets
+    scene_root: /tmp/taco_scene_root
+    trajectory_file: trajectory_ctrl_30hz_im.npz
+    episodes:
+    - brush__brush__bowl__20230927_027
+    categories: null
+    one_per_category: false
+    max_episodes: null
+    obs_mode: pc2_qpos
+    obs_horizon: 16
+    num_points: 512
+    total_num_envs: 128
+    auto_reset: false
+    ignore_terminations: false
+    max_steps_per_rollout_epoch: 200
+    max_episode_steps: 200
+    success_threshold_m: 0.1
+    seed: 0
+    group_size: 1
+    use_fixed_reset_state_ids: true
+    is_eval: false
+    num_threads: 0
+    reward:
+      type: tracking
+      tool_pos_weight: 1.0
+      target_pos_weight: 1.0
+      hand_qpos_weight: 0.5
+      tool_pos_scale: 0.05
+      target_pos_scale: 0.05
+      hand_qpos_scale: 0.5
+      contact_weight: 0.0
+      contact_dist_tol: 0.001
+    rsi:
+      enabled: false
+      min_remaining_steps: 8
+    early_termination:
+      enabled: false
+      criteria:
+      - hand_object_distance
+      min_steps: 8
+      hand_object_dist_threshold: 0.1
+      object_err_threshold: 0.1
+    single_step:
+      enabled: false
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: false
+      min_frame: 0
+    demo_start:
+      enabled: false
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: false
+      min_frame: 0
+    horizon_curriculum:
+      enabled: true
+      collect_current_horizon_only: true
+      sample_to_global_batch_multiple: true
+      max_train_global_batches_per_step: 8
+      start_horizon: 4
+      end_horizon: 200
+      milestones:
+      - step: 0
+        horizon: 4
+      - step: 500
+        horizon: 8
+      - step: 1000
+        horizon: 16
+      - step: 1800
+        horizon: 32
+      - step: 2800
+        horizon: 64
+      - step: 3800
+        horizon: 128
+      - step: 4500
+        horizon: 200
+    video_cfg:
+      save_video: false
+      info_on_video: false
+      video_base_dir: ../results/video/train
+    video_num_envs: 4
+    render_height: 240
+    render_width: 320
+  eval:
+    env_type: taco
+    sim_backend: cpu
+    gpu_cuda_graph: true
+    gpu_nconmax_per_env: 100
+    gpu_njmax_per_env: 350
+    dataset_root: /root/Data/taco-brush-allegro
+    allegro_assets_root: /root/Spider/spider/assets/robots/allegro/assets
+    scene_root: /tmp/taco_scene_root
+    trajectory_file: trajectory_ctrl_30hz_im.npz
+    episodes:
+    - brush__brush__bowl__20230927_027
+    categories: null
+    one_per_category: false
+    max_episodes: null
+    obs_mode: pc2_qpos
+    obs_horizon: 16
+    num_points: 512
+    total_num_envs: 16
+    auto_reset: false
+    ignore_terminations: false
+    max_steps_per_rollout_epoch: 200
+    max_episode_steps: 200
+    success_threshold_m: 0.1
+    seed: 1000
+    group_size: 1
+    use_fixed_reset_state_ids: true
+    is_eval: true
+    num_threads: 0
+    reward:
+      type: tracking
+      tool_pos_weight: 1.0
+      target_pos_weight: 1.0
+      hand_qpos_weight: 0.5
+      tool_pos_scale: 0.05
+      target_pos_scale: 0.05
+      hand_qpos_scale: 0.5
+      contact_weight: 0.0
+      contact_dist_tol: 0.001
+    rsi:
+      enabled: false
+      min_remaining_steps: 8
+    early_termination:
+      enabled: false
+      criteria:
+      - hand_object_distance
+      min_steps: 8
+      hand_object_dist_threshold: 0.1
+      object_err_threshold: 0.1
+    single_step:
+      enabled: false
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: false
+      min_frame: 0
+    demo_start:
+      enabled: false
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: false
+      min_frame: 0
+    horizon_curriculum:
+      enabled: false
+      collect_current_horizon_only: true
+      sample_to_global_batch_multiple: true
+      max_train_global_batches_per_step: null
+      start_horizon: 1
+      end_horizon: 200
+      milestones: []
+    video_cfg:
+      save_video: false
+      info_on_video: false
+      video_base_dir: ../results/video/train
+    video_num_envs: 4
+    render_height: 240
+    render_width: 320
+  group_name: EnvGroup
+actor:
+  model:
+    model_type: flow_policy_taco
+    model_path: /root/flow-policy/outputs/flow-policy/2026-06-10/18-12-14/checkpoints/epoch_800.pt
+    random_init: false
+    precision: null
+    num_action_chunks: 4
+    action_dim: 44
+    is_lora: false
+    num_denoise_steps: 0
+    noise_method: flow_sde
+    noise_level: 0.5
+    safe_get_logprob: false
+    ignore_last: false
+    add_value_head: true
+    detach_critic_input: true
+    value_head_hidden_sizes:
+    - 256
+    - 128
+  fsdp_config:
+    strategy: fsdp
+    sharding_strategy: no_shard
+    gradient_checkpointing: false
+    cpu_offload: false
+    offload_pin_memory: false
+    reshard_after_forward: true
+    enable_gradient_accumulation: true
+    forward_prefetch: false
+    limit_all_gathers: false
+    backward_prefetch: null
+    use_orig_params: false
+    use_liger_kernel: false
+    mixed_precision:
+      param_dtype: null
+      reduce_dtype: null
+      buffer_dtype: null
+    amp_autocast:
+      enabled: false
+      precision: bf16
+    grad_scaler:
+      enabled: false
+  group_name: ActorGroup
+  training_backend: fsdp
+  micro_batch_size: 16
+  global_batch_size: 128
+  seed: 42
+  enable_offload: false
+  optim:
+    lr: 1.0e-05
+    value_lr: 0.0001
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 0.01
+    clip_grad: 1.0
+    critic_warmup_steps: 20
+weight_syncer:
+  type: patch
+  patch:
+    snapshot_device: cpu
+    delta_encoding: true
+    compression: none
+    init_sync:
+      enabled: true
+      prefixes: null
+      bucket_size: 134217728
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: 0-1
+runner:
+  task_type: embodied
+  logger:
+    log_path: ../results
+    project_name: taco-allegro-flow-rl
+    experiment_name: r01-cap8-ue1-step0-h4to200-chunk4-gbs128-brush_bowl
+    logger_backends:
+    - wandb
+    - tensorboard
+    wandb_tags:
+    - R01
+    - step0
+    - curriculum
+    - cap8
+    - update_epoch1
+    - object-hand-tracking
+    - chunk4
+    wandb_notes: 'Round 01 E1: cap PPO training to 8 global batches per rollout pool
+      and use update_epoch=1. Tests whether A4 failure was caused by too many PPO
+      updates per global step.
+
+      Reset always starts from demo frame 0; horizon curriculum runs 4->200 control
+
+      steps with action chunk=4. collect_current_horizon_only=True avoids fixed-envelope
+
+      rollout waste. sample_to_global_batch_multiple=True keeps PPO minibatch splitting
+
+      valid, and max_train_global_batches_per_step=8 caps train updates without
+
+      changing rollout collection. Reward tracks both objects and hand qpos. GPUs
+      0-1.
+
+      '
+  max_epochs: 5000
+  max_steps: -1
+  only_eval: false
+  val_check_interval: -1
+  save_interval: 500
+  resume_dir: null
+  ckpt_path: null
+algorithm:
+  normalize_advantages: true
+  kl_penalty: kl
+  group_size: 1
+  reward_coef: 1.0
+  rollout_epoch: 1
+  eval_rollout_epoch: 1
+  reward_type: chunk_level
+  logprob_type: token_level
+  entropy_type: token_level
+  update_epoch: 1
+  adv_type: gae
+  loss_type: actor_critic
+  loss_agg_func: token-mean
+  kl_beta: 0.0
+  entropy_bonus: 0
+  clip_ratio_high: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 10.0
+  huber_delta: 10.0
+  gamma: 0.99
+  gae_lambda: 0.95
+  filter_rewards: false
+  rewards_lower_bound: 0.1
+  rewards_upper_bound: 0.9
+  sampling_params:
+    do_sample: true
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: false
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+rollout:
+  group_name: RolloutGroup
+  generation_backend: huggingface
+  enable_offload: false
+  pipeline_stage_num: 1
+  model:
+    model_path: /root/flow-policy/outputs/flow-policy/2026-06-10/18-12-14/checkpoints/epoch_800.pt
+    precision: null
+reward:
+  use_reward_model: false
+critic:
+  use_critic_model: false

@@ -21,7 +21,8 @@ Curriculum 的目标是让 rollout horizon 随训练逐渐变长，但不要把 
 2. Env/rollout 只收集当前 horizon 对应的真实 transition pool。
 3. Actor 先在这个真实 pool 上计算 advantage/return。
 4. PPO 更新前，只为了满足 dataloader 切分，把有效 pool resize 到最近的 `actor.global_batch_size` 整数倍。
-5. Actor 按 `global_batch_size` 切成一个或多个 train global batches。
+5. 若设置了 `max_train_global_batches_per_step`，再从 resized pool 中下采样到最多指定个数的 train global batches。
+6. Actor 按 `global_batch_size` 切成一个或多个 train global batches。
 
 被删除的旧语义是：从有效 pool 中强行采样到等于一个 `global_batch_size`。这会把“rollout size”和“batch size”重新耦合，不再作为支持路径。
 
@@ -32,6 +33,7 @@ horizon_curriculum:
   enabled: True
   collect_current_horizon_only: True
   sample_to_global_batch_multiple: True
+  max_train_global_batches_per_step: null
   start_horizon: 4
   end_horizon: 200
   milestones:
@@ -97,6 +99,21 @@ updates_per_global_step = update_epoch * resized_pool_size / global_batch_size
 
 这比“每个 global step 必须 rollout 出恰好一个 global_batch_size”更自然；rollout 只由当前 curriculum horizon 决定。
 
+### horizon_curriculum.max_train_global_batches_per_step
+
+可选的 PPO 更新强度上限。默认 `null`，表示使用 resize 后的整个有效 pool。
+
+若设置为整数 `M`：
+
+```text
+train_samples_per_global_step <= M * actor.global_batch_size
+optimizer_updates_per_global_step <= M * update_epoch
+```
+
+执行位置在 advantage/return 已经对完整 rollout pool 算完之后、PPO minibatch 切分之前。若 pool 大于 cap，则无放回随机下采样；若 pool 小于一个 `global_batch_size`，仍会按 `sample_to_global_batch_multiple` 的规则补齐到至少一个 train global batch。
+
+这个参数不改变 env rollout，不减少长 horizon 阶段需要执行的 policy/env steps；它只控制“从本轮 on-policy pool 中拿多少 transitions 做 PPO 更新”。因此它适合处理 A4 中 horizon 变长后每个 global step update 次数暴涨的问题。
+
 ### start_horizon / end_horizon
 
 Curriculum 的最小和最大 horizon。`end_horizon` 通常等于 `env.train.max_episode_steps`。
@@ -149,7 +166,8 @@ horizon=200 -> train_chunk_steps=50
 5. Env 执行 action chunk，形成真实 rollout pool。
 6. Actor 先基于完整 pool 计算 advantage/return。
 7. 若 `sample_to_global_batch_multiple=True`，actor resize 有效 pool 到最近的 `global_batch_size` 整数倍。
-8. Actor 按 `global_batch_size` 切成 train global batches，并对每个 batch 执行 `update_epoch` 轮 PPO 更新。
+8. 若 `max_train_global_batches_per_step=M`，actor 最多保留 `M` 个 train global batches。
+9. Actor 按 `global_batch_size` 切成 train global batches，并对每个 batch 执行 `update_epoch` 轮 PPO 更新。
 
 ## 6. Step0 Curriculum (A4)
 
@@ -206,7 +224,8 @@ horizon 200 -> collected chunks 6400 -> 200 optimizer updates / global step
 - `rollout/curriculum_sampled_batch_size_per_rank`：每个 actor rank resize 后的 batch pool size。
 - `rollout/curriculum_sample_with_replacement`：pool 不足、需要有放回补齐时为 1，否则为 0。
 - `rollout/curriculum_sample_reuse_ratio`：`target_size_per_rank / pool_size_per_rank`。
-- `rollout/curriculum_sample_global_batch_multiple`：resize 后包含多少个 train global batches。
+- `rollout/curriculum_sample_global_batch_multiple`：resize/cap 后实际包含多少个 train global batches。
+- `rollout/curriculum_max_train_global_batches_per_step`：若设置了 cap，记录该 cap 值。
 
 ## 8. 使用建议
 
@@ -220,3 +239,14 @@ horizon_curriculum:
 ```
 
 这样 rollout horizon 和 actor batch size 解耦：horizon 决定收集多少 on-policy samples，`global_batch_size` 只决定 PPO 每次 optimizer update 消耗多少 samples。
+
+当长 horizon 导致 `updates_per_global_step` 过大、KL/clip fraction 明显飙升时，建议加：
+
+```yaml
+horizon_curriculum:
+  max_train_global_batches_per_step: 8  # 或 16，按实验对比
+algorithm:
+  update_epoch: 1
+```
+
+这样 horizon=200、`num_action_chunks=4`、`total_num_envs=128` 时仍会收集完整 6400 个 action-chunk transitions，但每个 global step 最多训练 `8 * update_epoch` 个 PPO global batches。

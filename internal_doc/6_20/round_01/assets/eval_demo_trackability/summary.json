@@ -1,0 +1,22 @@
+[
+  {
+    "episode": "brush__brush__bowl__20230927_027",
+    "triplet": "(brush, brush, bowl)",
+    "control": "demo",
+    "frames": 205,
+    "demo_frames": 205,
+    "sim_dt": 0.01,
+    "substeps_per_ctrl": 3,
+    "action_horizon_Ta": 1,
+    "obs_horizon_To": 1,
+    "pred_horizon_Tp": 1,
+    "frame0_pc_align_err_m": 0.0,
+    "target_pos_err_mean_m": 0.07041434957769838,
+    "target_pos_err_final_m": 0.09499818020376935,
+    "tool_pos_err_mean_m": 0.09252335651253187,
+    "tool_pos_err_final_m": 0.07995844296933166,
+    "hand_qpos_err_mean": 0.023276493676860445,
+    "success_tool_0.1m": true,
+    "video": "/root/RLinf/internal_doc/6_20/round_01/assets/eval_demo_trackability/brush__brush__bowl__20230927_027/rollout.mp4"
+  }
+]
