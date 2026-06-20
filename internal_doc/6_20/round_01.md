@@ -148,3 +148,35 @@ Launched from commit `9b674f6a` after successful one-step smoke.
 | E4 cap8 ue1 hand1 | 1591949 | `/root/RLinf/logs/20260620-r01-cap8-ue1-hand1` | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/4gayijwh |
 
 Initial status check at ~1m after launch: all four parent processes alive, all four logs reached at least `Global Step >= 8`, and `nvidia-smi` showed nonzero utilization on GPUs 0-7.
+
+
+## Mid-Run Checkpoint: Step 2000
+
+At the horizon32 transition, E3 (`cap8 + update_epoch=1 + low_lr`) is the clearest leader in training metrics.
+
+W&B summary near step 2000:
+
+| ID | horizon | reward | hand_err | tool_err_m | target_err_m | approx_kl | clip_fraction |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| E1 cap8 | 32 | 0.875 | 0.276 | 0.0079 | 0.0024 | 0.026 | 0.010 |
+| E2 cap16 | 32 | 0.889 | 0.241 | 0.0079 | 0.0024 | 0.183 | 0.947 |
+| E3 lowlr | 32 | 0.910 | 0.124 | 0.0079 | 0.0024 | 0.035 | 0.084 |
+| E4 hand1 | 32 | 0.808 | 0.242 | 0.0079 | 0.0024 | 0.056 | 0.106 |
+
+E3 step2000 closed-loop eval artifacts:
+
+- Video: `internal_doc/6_20/round_01/assets/eval_r01_e3_gs2000_policy/brush__brush__bowl__20230927_027/rollout.mp4`
+- Montage: `internal_doc/6_20/round_01/assets/r01_e3_gs2000_eval_montage.jpg`
+- Error summary: `internal_doc/6_20/round_01/assets/r01_e3_gs2000_eval_error_summary.json`
+
+Closed-loop eval result:
+
+```text
+tool_pos_err_final_m   = 0.0331
+target_pos_err_final_m = 0.0272
+hand_qpos_err_mean     = 0.3713
+hand_qpos_err_final    = 0.3842
+first_hand_gt_0.4      = frame 56
+```
+
+Compared with A4 global_step_5000, E3 step2000 still uses out-of-distribution hand motion, but the drift is delayed and reduced: A4 crosses hand error 0.4 at frame 12 and has hand mean 0.4505, while E3 crosses at frame 56 and has hand mean 0.3713. This supports low LR as a stabilizing direction, but it does not solve the hand-distribution problem by itself.
