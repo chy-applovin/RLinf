@@ -134,3 +134,17 @@ env EMBODIED_PATH=/root/RLinf/examples/embodiment /root/RLinf/.venv/bin/python e
 ```bash
 env EMBODIED_PATH=/root/RLinf/examples/embodiment /root/RLinf/.venv/bin/python examples/embodiment/train_embodied_agent.py --config-path /root/RLinf/examples/embodiment/config --config-name taco_allegro_ppo_flow_r01_cap8_ue1_hand1 runner.logger.log_path=/root/RLinf/logs/20260620-r01-cap8-ue1-hand1
 ```
+
+
+## Launch Status
+
+Launched from commit `9b674f6a` after successful one-step smoke.
+
+| ID | PID | log dir | W&B run |
+| --- | ---: | --- | --- |
+| E1 cap8 ue1 | 1591946 | `/root/RLinf/logs/20260620-r01-cap8-ue1` | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/k0xf8ff2 |
+| E2 cap16 ue1 | 1591947 | `/root/RLinf/logs/20260620-r01-cap16-ue1` | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/9090crq9 |
+| E3 cap8 ue1 lowlr | 1591948 | `/root/RLinf/logs/20260620-r01-cap8-ue1-lowlr` | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/x1iggz8d |
+| E4 cap8 ue1 hand1 | 1591949 | `/root/RLinf/logs/20260620-r01-cap8-ue1-hand1` | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/4gayijwh |
+
+Initial status check at ~1m after launch: all four parent processes alive, all four logs reached at least `Global Step >= 8`, and `nvidia-smi` showed nonzero utilization on GPUs 0-7.
