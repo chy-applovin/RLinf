@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from rlinf.envs.taco.scene import HAND_DIM, synth_obs_frame
+from rlinf.envs.taco.scene import synth_obs_frame
 
 if TYPE_CHECKING:
     from rlinf.envs.taco.scene import EpisodeData
@@ -78,13 +78,13 @@ class DemoTimestepSampler:
         with self._rng_lock:
             return int(self._rng.integers(lo, hi + 1))
 
-    def sample_hand_noise(self, obs_horizon: int) -> np.ndarray:
-        """(To, HAND_DIM) iid Gaussian hand-qpos noise; zeros when std <= 0."""
+    def sample_hand_noise(self, obs_horizon: int, hand_dim: int) -> np.ndarray:
+        """(To, hand_dim) iid Gaussian hand-qpos noise; zeros when std <= 0."""
         if self.hand_obs_noise_std <= 0.0:
-            return np.zeros((obs_horizon, HAND_DIM), dtype=np.float64)
+            return np.zeros((obs_horizon, hand_dim), dtype=np.float64)
         with self._rng_lock:
             return self._rng.normal(
-                0.0, self.hand_obs_noise_std, size=(obs_horizon, HAND_DIM)
+                0.0, self.hand_obs_noise_std, size=(obs_horizon, hand_dim)
             )
 
     def build_obs_history(
@@ -109,13 +109,15 @@ class DemoTimestepSampler:
             hist.append(frame)
         return hist
 
-    def noise_obs_frame(self, frame: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    def noise_obs_frame(
+        self, frame: dict[str, np.ndarray], hand_dim: int
+    ) -> dict[str, np.ndarray]:
         """Return a copy of one live obs frame with fresh hand-qpos obs noise."""
         if self.hand_obs_noise_std <= 0.0:
             return frame
         noised = dict(frame)
         with self._rng_lock:
-            noise = self._rng.normal(0.0, self.hand_obs_noise_std, size=(HAND_DIM,))
+            noise = self._rng.normal(0.0, self.hand_obs_noise_std, size=(hand_dim,))
         noised["qpos"] = (noised["qpos"] + noise).astype(np.float32)
         return noised
 
