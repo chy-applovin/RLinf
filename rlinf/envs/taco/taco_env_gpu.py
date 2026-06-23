@@ -41,6 +41,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from rlinf.envs.taco.robots import get_robot_spec
 from rlinf.envs.taco.scene import (
     HAND_DIM,
     TARGET_OBJ_QPOS,
@@ -139,10 +140,11 @@ class TacoEnvGPU(gym.Env):
         self.episode = load_episode_data(
             episode_dirs[0],
             Path(cfg.scene_root) / f"gpu_proc_{seed_offset}",
-            Path(cfg.allegro_assets_root),
+            Path(cfg.get("robot_assets_root", None) or cfg.allegro_assets_root),
             str(cfg.trajectory_file),
             self.num_points,
             self.need_tool_cloud,
+            get_robot_spec(str(cfg.get("robot", "allegro"))),
         )
         self.ep_len = min(self.max_episode_steps, self.episode.num_frames - 1)
 

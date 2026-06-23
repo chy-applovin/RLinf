@@ -1,0 +1,32 @@
+model_type: "flow_policy_taco"
+
+# flow-policy IL checkpoint (.pt with model/normalizer/shape_meta/cfg). This is
+# the 56-dim sharpa-hand checkpoint (shape_meta action_dim/qpos_dim = 56).
+model_path: "/root/Data/flow-policy-ckpts/taco-brush-sharpa-both-success/epoch_3000.pt"
+
+# If True, use the checkpoint only as the architecture/IO spec (shape_meta,
+# model hyperparams, dataset-fitted normalizer stats) and keep RANDOM weights
+# in the flow transformer - RL from scratch.
+random_init: False
+
+precision: null # keep the small flow transformer in fp32
+
+# Action interface: the policy predicts a (Tp=16, 56) qpos chunk; the env
+# executes the first num_action_chunks steps before replanning (= the IL
+# action_horizon Ta by default).
+num_action_chunks: 4
+action_dim: 56
+
+is_lora: False
+
+# ---------------------------------------------- flow-matching RL (piRL-style)
+num_denoise_steps: 0      # 0 -> use the checkpoint's num_sample_steps
+noise_method: "flow_sde"  # flow_ode | flow_sde | flow_cps
+noise_level: 0.5          # exploration noise scale (eta)
+safe_get_logprob: False
+ignore_last: False        # if True, never inject noise at the final denoise step
+
+# --------------------------------------------------------------------- critic
+add_value_head: True
+detach_critic_input: True # value head does not backprop into the obs encoders
+value_head_hidden_sizes: [256, 128]

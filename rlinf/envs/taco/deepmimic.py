@@ -50,12 +50,7 @@ from typing import Any
 import mujoco
 import numpy as np
 
-from rlinf.envs.taco.scene import (
-    HAND_DIM,
-    TARGET_OBJ_QPOS,
-    TOOL_OBJ_QPOS,
-    EpisodeData,
-)
+from rlinf.envs.taco.scene import EpisodeData
 
 __all__ = ["RSISampler", "EarlyTermination"]
 
@@ -96,6 +91,7 @@ class EarlyTermination:
         episode: EpisodeData,
     ):
         cfg = dict(cfg) if cfg else {}
+        self._spec = episode.spec
         self.enabled = bool(cfg.get("enabled", False))
         self.criteria = list(cfg.get("criteria", ["hand_object_distance"]))
         unknown = [c for c in self.criteria if c not in _VALID_CRITERIA]
@@ -129,16 +125,17 @@ class EarlyTermination:
         n = demo.shape[0]
         self.demo_tool_dist = np.empty(n)
         self.demo_target_dist = np.empty(n)
+        tool_q, target_q = self._spec.tool_obj_qpos, self._spec.target_obj_qpos
         for t in range(n):
             scratch.qpos[:] = demo[t]
             mujoco.mj_kinematics(model, scratch)
             self.demo_tool_dist[t] = np.linalg.norm(
                 scratch.xpos[self._right_palm]
-                - demo[t, TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
+                - demo[t, tool_q.start : tool_q.start + 3]
             )
             self.demo_target_dist[t] = np.linalg.norm(
                 scratch.xpos[self._left_palm]
-                - demo[t, TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
+                - demo[t, target_q.start : target_q.start + 3]
             )
 
     def check(
@@ -162,15 +159,16 @@ class EarlyTermination:
         demo_frame = min(demo_frame, episode.num_frames - 1)
         demo = episode.qpos_demo[demo_frame]
         qpos = data.qpos
+        tool_q, target_q = self._spec.tool_obj_qpos, self._spec.target_obj_qpos
 
         if "object_tracking" in self.criteria:
             tool_err = np.linalg.norm(
-                qpos[TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
-                - demo[TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
+                qpos[tool_q.start : tool_q.start + 3]
+                - demo[tool_q.start : tool_q.start + 3]
             )
             target_err = np.linalg.norm(
-                qpos[TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
-                - demo[TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
+                qpos[target_q.start : target_q.start + 3]
+                - demo[target_q.start : target_q.start + 3]
             )
             if max(tool_err, target_err) > self.object_err_threshold:
                 return True, "object_tracking"
@@ -180,11 +178,11 @@ class EarlyTermination:
             mujoco.mj_kinematics(model, data)
             sim_tool_dist = np.linalg.norm(
                 data.xpos[self._right_palm]
-                - qpos[TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
+                - qpos[tool_q.start : tool_q.start + 3]
             )
             sim_target_dist = np.linalg.norm(
                 data.xpos[self._left_palm]
-                - qpos[TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
+                - qpos[target_q.start : target_q.start + 3]
             )
             escape_tool = sim_tool_dist - self.demo_tool_dist[demo_frame]
             escape_target = sim_target_dist - self.demo_target_dist[demo_frame]
@@ -195,4 +193,4 @@ class EarlyTermination:
 
     @property
     def hand_dim(self) -> int:
-        return HAND_DIM
+        return self._spec.hand_dim
