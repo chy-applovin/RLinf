@@ -107,7 +107,7 @@ class _ContactRef:
     def __init__(
         self, model: mujoco.MjModel, episode: "EpisodeData", dist_tol: float
     ):
-        from rlinf.envs.taco.scene import TARGET_OBJ_QPOS, TOOL_OBJ_QPOS
+        spec = episode.spec
 
         self.dist_tol = float(dist_tol)
         right = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "right_palm")
@@ -118,10 +118,10 @@ class _ContactRef:
         self.right_hand = _subtree_geom_mask(model, right)
         self.left_hand = _subtree_geom_mask(model, left)
         self.tool = _subtree_geom_mask(
-            model, _body_of_qposadr(model, TOOL_OBJ_QPOS.start)
+            model, _body_of_qposadr(model, spec.tool_obj_qpos.start)
         )
         self.target = _subtree_geom_mask(
-            model, _body_of_qposadr(model, TARGET_OBJ_QPOS.start)
+            model, _body_of_qposadr(model, spec.target_obj_qpos.start)
         )
 
         scratch = mujoco.MjData(model)
@@ -212,24 +212,29 @@ class TrackingReward(BaseTacoReward):
         return ref
 
     def compute(self, sub: "_SubEnv") -> tuple[float, dict[str, float]]:
-        from rlinf.envs.taco.scene import HAND_DIM, TARGET_OBJ_QPOS, TOOL_OBJ_QPOS
+        spec = sub.episode.spec
+        tool_q, target_q, hand_dim = (
+            spec.tool_obj_qpos,
+            spec.target_obj_qpos,
+            spec.hand_dim,
+        )
 
         sim = sub.data.qpos
         demo = sub.demo_qpos(sub.steps)
 
         tool_err = float(
             np.linalg.norm(
-                sim[TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
-                - demo[TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
+                sim[tool_q.start : tool_q.start + 3]
+                - demo[tool_q.start : tool_q.start + 3]
             )
         )
         target_err = float(
             np.linalg.norm(
-                sim[TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
-                - demo[TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
+                sim[target_q.start : target_q.start + 3]
+                - demo[target_q.start : target_q.start + 3]
             )
         )
-        hand_err = float(np.abs(sim[:HAND_DIM] - demo[:HAND_DIM]).mean())
+        hand_err = float(np.abs(sim[:hand_dim] - demo[:hand_dim]).mean())
 
         weighted_sum = (
             self.w_tool * np.exp(-tool_err / self.s_tool)
