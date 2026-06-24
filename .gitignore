@@ -21,3 +21,8 @@ rlinf/envs/maniskill/assets
 PKG-INFO
 *.egg-info/
 .claude/settings.json
+
+# Personal working dir (plans, debug notes) — not for shared git history
+yjw_docs/
+yjw_scripts/
+kickoff/
