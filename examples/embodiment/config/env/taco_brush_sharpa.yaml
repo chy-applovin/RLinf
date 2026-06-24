@@ -1,8 +1,11 @@
 env_type: taco
 
 # Simulator backend: "cpu" (threaded CPU MuJoCo, original implementation) or
-# "gpu" (MuJoCo Warp, batched worlds on one CUDA device). sharpa runs on the
-# CPU backend (the GPU backend is Allegro-only for now).
+# "gpu" (MuJoCo Warp, batched worlds on one CUDA device). Both backends are
+# robot-agnostic and the gpu path is smoke-tested for sharpa (see
+# yjw_scripts/smoke_test_taco_gpu_sharpa.py). Defaults to cpu because the
+# flow-policy checkpoint was tracked on CPU MuJoCo and mjwarp contacts are only
+# numerically close, not bit-identical; tune gpu_nconmax_per_env on the gpu path.
 sim_backend: cpu
 gpu_cuda_graph: True
 gpu_nconmax_per_env: 100

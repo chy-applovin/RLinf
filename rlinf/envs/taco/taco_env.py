@@ -437,10 +437,10 @@ class TacoEnv(gym.Env):
         sub.final_hand_err = float(np.abs(sim[:hand_dim] - demo[:hand_dim]).mean())
 
     def step(self, actions, build_obs: bool = True):
-        """Execute one 44-dim qpos-target action per sub-env.
+        """Execute one hand_dim qpos-target action per sub-env.
 
         Args:
-            actions: (num_envs, 44) array of hand qpos targets.
+            actions: (num_envs, spec.hand_dim) array of hand qpos targets.
             build_obs: skip the (relatively expensive) stacked-obs assembly for
                 intermediate chunk steps; only the last step of a chunk needs it.
         """
@@ -475,7 +475,7 @@ class TacoEnv(gym.Env):
         return obs, rewards, terminations, truncations, infos
 
     def chunk_step(self, chunk_actions):
-        """Execute a (num_envs, chunk, 44) action chunk; RLinf EnvWorker API."""
+        """Execute a (num_envs, chunk, spec.hand_dim) chunk; RLinf EnvWorker API."""
         if isinstance(chunk_actions, torch.Tensor):
             chunk_actions = chunk_actions.detach().cpu().float().numpy()
         chunk_actions = np.asarray(chunk_actions)

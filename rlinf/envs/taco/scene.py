@@ -37,14 +37,9 @@ import numpy as np
 
 from rlinf.envs.taco.robots import RobotSpec
 
-# Legacy qpos layout of the bimanual Allegro TACO scenes (see Spider
-# scripts/convert_kinematic_to_act.py): 44 hand dofs + 2 free-joint objects.
-# These module-level constants are kept ONLY for the Allegro-only GPU backend
-# (taco_env_gpu.py). The CPU path is robot-parametrized via RobotSpec; see
+# The TACO qpos layout (hand dofs first, then the tool and target free joints)
+# is robot-parametrized via RobotSpec on both the CPU and GPU backends; see
 # rlinf/envs/taco/robots.py.
-HAND_DIM = 44
-TOOL_OBJ_QPOS = slice(44, 51)  # right object (tool): pos(3) + quat wxyz(4)
-TARGET_OBJ_QPOS = slice(51, 58)  # left object (target): pos(3) + quat wxyz(4)
 
 
 # --------------------------------------------------------------------- geometry
@@ -72,13 +67,13 @@ def obj_pose(qpos_obj: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def synth_obs_frame(
     qpos: np.ndarray, episode: "EpisodeData", need_tool: bool
 ) -> dict[str, np.ndarray]:
-    """Synthesize one observation frame from a (58,) qpos vector.
+    """Synthesize one observation frame from a single qpos vector.
 
-    Re-poses the canonical object-frame clouds with the object pose in ``qpos``
-    and slices the hand qpos. Works for both the live sim state and any demo
+    The qpos length is robot-dependent (e.g. 58 for Allegro, 70 for sharpa);
+    the layout comes from ``episode.spec``. Re-poses the canonical object-frame
+    clouds with the object pose in ``qpos`` and slices the hand qpos. Works for both the live sim state and any demo
     frame, so the closed-loop obs (``_SubEnv.obs_frame``) and the single-step
-    demo-history obs share identical synthesis logic. The qpos layout comes
-    from ``episode.spec`` (robot-parametrized).
+    demo-history obs share identical synthesis logic.
     """
     spec = episode.spec
     p, rot = obj_pose(qpos[spec.target_obj_qpos])
@@ -193,10 +188,16 @@ def prepare_scene(
                 pass
     # Bridge baked/shared scene mesh names to the on-disk source files.
     for alias, src in spec.mesh_alias.items():
+        src_path = robot_assets / src
+        if not src_path.exists():
+            raise FileNotFoundError(
+                f"robot '{spec.name}' mesh alias '{alias}' -> '{src}' not found "
+                f"under robot_assets_root '{robot_assets}'."
+            )
         link = rob / alias
         if not link.exists():
             try:
-                link.symlink_to(robot_assets / src)
+                link.symlink_to(src_path)
             except FileExistsError:
                 pass
     objdst = scene_root / "assets" / "objects"
@@ -228,14 +229,14 @@ class EpisodeData:
     name: str
     category: str
     scene_xml: str
-    qpos_demo: np.ndarray  # (T, 58) float64
-    qvel_demo: np.ndarray  # (T, 56) float64
+    qpos_demo: np.ndarray  # (T, nq) float64; nq is robot-dependent (spec)
+    qvel_demo: np.ndarray  # (T, nv) float64; nv is robot-dependent (spec)
     frequency: float
     # canonical object-frame clouds (already FPS-subsampled to num_points)
     target_local: np.ndarray  # (K, 3) float64
     tool_local: np.ndarray | None  # (K, 3) float64, only for pc2_qpos
     meta: dict = field(default_factory=dict)
-    spec: RobotSpec = None  # robot qpos layout; set by load_episode_data
+    spec: RobotSpec | None = None  # robot qpos layout; set by load_episode_data
 
     @property
     def num_frames(self) -> int:
