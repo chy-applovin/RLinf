@@ -35,11 +35,11 @@ from pathlib import Path
 
 import numpy as np
 
-# qpos layout of the bimanual Allegro TACO scenes (see Spider
-# scripts/convert_kinematic_to_act.py): 44 hand dofs + 2 free-joint objects.
-HAND_DIM = 44
-TOOL_OBJ_QPOS = slice(44, 51)  # right object (tool): pos(3) + quat wxyz(4)
-TARGET_OBJ_QPOS = slice(51, 58)  # left object (target): pos(3) + quat wxyz(4)
+from rlinf.envs.taco.robots import RobotSpec
+
+# The TACO qpos layout (hand dofs first, then the tool and target free joints)
+# is robot-parametrized via RobotSpec on both the CPU and GPU backends; see
+# rlinf/envs/taco/robots.py.
 
 
 # --------------------------------------------------------------------- geometry
@@ -67,20 +67,22 @@ def obj_pose(qpos_obj: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 def synth_obs_frame(
     qpos: np.ndarray, episode: "EpisodeData", need_tool: bool
 ) -> dict[str, np.ndarray]:
-    """Synthesize one observation frame from a (58,) qpos vector.
+    """Synthesize one observation frame from a single qpos vector.
 
-    Re-poses the canonical object-frame clouds with the object pose in ``qpos``
-    and slices the 44-dim hand qpos. Works for both the live sim state and any
-    demo frame, so the closed-loop obs (``_SubEnv.obs_frame``) and the
-    single-step demo-history obs share identical synthesis logic.
+    The qpos length is robot-dependent (e.g. 58 for Allegro, 70 for sharpa);
+    the layout comes from ``episode.spec``. Re-poses the canonical object-frame
+    clouds with the object pose in ``qpos`` and slices the hand qpos. Works for both the live sim state and any demo
+    frame, so the closed-loop obs (``_SubEnv.obs_frame``) and the single-step
+    demo-history obs share identical synthesis logic.
     """
-    p, rot = obj_pose(qpos[TARGET_OBJ_QPOS])
+    spec = episode.spec
+    p, rot = obj_pose(qpos[spec.target_obj_qpos])
     frame = {
         "pointcloud": (episode.target_local @ rot.T + p).astype(np.float32),
-        "qpos": qpos[:HAND_DIM].astype(np.float32).copy(),
+        "qpos": qpos[: spec.hand_dim].astype(np.float32).copy(),
     }
     if need_tool:
-        pr, rr = obj_pose(qpos[TOOL_OBJ_QPOS])
+        pr, rr = obj_pose(qpos[spec.tool_obj_qpos])
         frame["tool_pointcloud"] = (episode.tool_local @ rr.T + pr).astype(np.float32)
     return frame
 
@@ -163,22 +165,39 @@ def select_episodes(
 
 
 # ---------------------------------------------------------------------- scene io
-def prepare_scene(episode_dir: Path, scene_root: Path, allegro_assets: Path) -> str:
+def prepare_scene(
+    episode_dir: Path, scene_root: Path, spec: RobotSpec, robot_assets: Path
+) -> str:
     """Symlink the episode into a Spider processed layout; return scene.xml path.
 
     Layout (so ``meshdir=../../../assets/`` inside the episode scene resolves):
 
-        {scene_root}/assets/robots/allegro/assets/*.stl
+        {scene_root}/assets/robots/{spec.name}/assets/*.STL  (+ spec.mesh_alias)
         {scene_root}/assets/objects/{tool_*,target_*}
-        {scene_root}/allegro/bimanual/{episode}/scene.xml
+        {scene_root}/{spec.name}/bimanual/{episode}/scene.xml
     """
-    rob = scene_root / "assets" / "robots" / "allegro" / "assets"
+    rob = scene_root / "assets" / "robots" / spec.name / "assets"
     rob.mkdir(parents=True, exist_ok=True)
-    for stl in Path(allegro_assets).glob("*.stl"):
+    robot_assets = Path(robot_assets)
+    for stl in list(robot_assets.glob("*.stl")) + list(robot_assets.glob("*.STL")):
         link = rob / stl.name
         if not link.exists():
             try:
                 link.symlink_to(stl)
+            except FileExistsError:
+                pass
+    # Bridge baked/shared scene mesh names to the on-disk source files.
+    for alias, src in spec.mesh_alias.items():
+        src_path = robot_assets / src
+        if not src_path.exists():
+            raise FileNotFoundError(
+                f"robot '{spec.name}' mesh alias '{alias}' -> '{src}' not found "
+                f"under robot_assets_root '{robot_assets}'."
+            )
+        link = rob / alias
+        if not link.exists():
+            try:
+                link.symlink_to(src_path)
             except FileExistsError:
                 pass
     objdst = scene_root / "assets" / "objects"
@@ -190,7 +209,7 @@ def prepare_scene(episode_dir: Path, scene_root: Path, allegro_assets: Path) -> 
                 link.symlink_to(od)
             except FileExistsError:
                 pass
-    taskdir = scene_root / "allegro" / "bimanual" / episode_dir.name
+    taskdir = scene_root / spec.name / "bimanual" / episode_dir.name
     taskdir.mkdir(parents=True, exist_ok=True)
     scene = taskdir / "scene.xml"
     if not scene.exists():
@@ -210,13 +229,14 @@ class EpisodeData:
     name: str
     category: str
     scene_xml: str
-    qpos_demo: np.ndarray  # (T, 58) float64
-    qvel_demo: np.ndarray  # (T, 56) float64
+    qpos_demo: np.ndarray  # (T, nq) float64; nq is robot-dependent (spec)
+    qvel_demo: np.ndarray  # (T, nv) float64; nv is robot-dependent (spec)
     frequency: float
     # canonical object-frame clouds (already FPS-subsampled to num_points)
     target_local: np.ndarray  # (K, 3) float64
     tool_local: np.ndarray | None  # (K, 3) float64, only for pc2_qpos
     meta: dict = field(default_factory=dict)
+    spec: RobotSpec | None = None  # robot qpos layout; set by load_episode_data
 
     @property
     def num_frames(self) -> int:
@@ -246,10 +266,11 @@ def _canonical_cloud(
 def load_episode_data(
     episode_dir: Path,
     scene_root: Path,
-    allegro_assets: Path,
+    robot_assets: Path,
     trajectory_file: str,
     num_points: int,
     need_tool_cloud: bool,
+    spec: RobotSpec,
 ) -> EpisodeData:
     """Load everything needed to instantiate + observe one episode scene."""
     traj = np.load(episode_dir / trajectory_file, allow_pickle=True)
@@ -261,18 +282,18 @@ def load_episode_data(
     # rng seed 0 matches rollout_eval.py so FPS picks identical points.
     rng = np.random.default_rng(0)
     target_local = _canonical_cloud(
-        episode_dir, "target", TARGET_OBJ_QPOS, qpos_demo, pc_start, num_points, rng
+        episode_dir, "target", spec.target_obj_qpos, qpos_demo, pc_start, num_points, rng
     )
     tool_local = None
     if need_tool_cloud:
         tool_local = _canonical_cloud(
-            episode_dir, "tool", TOOL_OBJ_QPOS, qpos_demo, pc_start, num_points, rng
+            episode_dir, "tool", spec.tool_obj_qpos, qpos_demo, pc_start, num_points, rng
         )
 
     meta_path = episode_dir / "pointcloud" / "meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
 
-    scene_xml = prepare_scene(episode_dir, scene_root, allegro_assets)
+    scene_xml = prepare_scene(episode_dir, scene_root, spec, robot_assets)
     return EpisodeData(
         episode_dir=episode_dir,
         name=episode_dir.name,
@@ -284,4 +305,5 @@ def load_episode_data(
         target_local=target_local,
         tool_local=tool_local,
         meta=meta,
+        spec=spec,
     )

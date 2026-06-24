@@ -1,33 +1,39 @@
 env_type: taco
 
 # Simulator backend: "cpu" (threaded CPU MuJoCo, original implementation) or
-# "gpu" (MuJoCo Warp, batched worlds on one CUDA device). The GPU backend
-# currently requires a SINGLE episode per worker (episodes: [name]), supports
-# reward.type tracking/zero only, and no video capture.
+# "gpu" (MuJoCo Warp, batched worlds on one CUDA device). Both backends are
+# robot-agnostic and the gpu path is smoke-tested for sharpa (see
+# yjw_scripts/smoke_test_taco_gpu_sharpa.py). Defaults to cpu because the
+# flow-policy checkpoint was tracked on CPU MuJoCo and mjwarp contacts are only
+# numerically close, not bit-identical; tune gpu_nconmax_per_env on the gpu path.
 sim_backend: cpu
 gpu_cuda_graph: True
 gpu_nconmax_per_env: 100
 gpu_njmax_per_env: 350
 
 # Robot hand: selects the qpos layout + asset materialization (see
-# rlinf/envs/taco/robots.py). "allegro" (44 dof) or "sharpa" (56 dof).
-robot: allegro
+# rlinf/envs/taco/robots.py). sharpa = 56 hand dofs + 2 free-joint objects.
+robot: sharpa
 
 # ------------------------------------------------------------------ dataset
 # Each episode folder = one scene (env) instance: scene.xml + objects/ +
-# trajectory_ctrl_30hz*.npz + pointcloud/.
-dataset_root: /root/Data/taco-brush-allegro
-# Robot STL meshes referenced by scene.xml (meshdir=../../../assets/).
-# allegro_assets_root is the legacy key; robot_assets_root (generic) takes
-# precedence when set.
+# trajectory_*.npz + pointcloud/.
+dataset_root: /root/Data/taco-brush-sharpa
+# sharpa STL meshes referenced by scene.xml (meshdir=../../../assets/), vendored
+# in-repo so no external asset path is needed. The dataset scenes reference 6
+# fingertip meshes by a baked shared-geometry naming that robots.py bridges to
+# these per-finger files via symlink aliases. EMBODIED_PATH is exported by the
+# run scripts (= <repo>/examples/embodiment).
+robot_assets_root: ${oc.env:EMBODIED_PATH}/assets/robots/sharpa/meshes
+# Legacy key (unused when robot_assets_root is set).
 allegro_assets_root: /root/Spider/spider/assets/robots/allegro/assets
 # Where the Spider "processed" symlink layout is materialized at runtime.
 scene_root: /tmp/taco_scene_root
-# Demo trajectory variant; *_im.npz = improved IK retarget labels (must match
-# the labels the flow-policy checkpoint was trained on).
-trajectory_file: trajectory_ctrl_30hz_im.npz
+# Demo trajectory variant. trajectory_mpc_30hz.npz is the MPC-tracked 56-dim
+# sharpa trajectory the flow-policy checkpoint was trained on (its action_key).
+trajectory_file: trajectory_mpc_30hz.npz
 
-# Episode selection (null = all 411 episodes).
+# Episode selection (null = all 415 episodes).
 episodes: null            # explicit list of episode folder names
 categories: null          # filter by verb__tool__target categories
 one_per_category: False   # keep one (deterministic) episode per category
@@ -64,15 +70,11 @@ reward:
   tool_pos_scale: 0.05    # meters
   target_pos_scale: 0.05  # meters
   hand_qpos_scale: 0.5    # radians
-  # Contact-consistency term (anti reward-hacking; CPU backend only):
-  # when the aligned demo frame has hand-object contact, reward the sim for
-  # actually being in contact (right hand<->tool, left hand<->target).
-  # 0.0 = off. See TrackingReward docstring in rlinf/envs/taco/rewards.py.
+  # Contact-consistency term (anti reward-hacking; CPU backend only).
   contact_weight: 0.0
   contact_dist_tol: 1.0e-3 # a contact counts as touching when dist < tol (m)
 
 # -------------------------------------- DeepMimic training aids (default off)
-# Both implemented for sim_backend: cpu; see rlinf/envs/taco/deepmimic.py.
 rsi: # Reference State Initialization: start episodes at random demo frames
   enabled: False
   min_remaining_steps: 8 # never start within this many steps of the demo end
@@ -81,62 +83,33 @@ early_termination: # end episodes on unrecoverable failure
   criteria: ["hand_object_distance"] # and/or "object_tracking"
   min_steps: 8 # grace period (control steps) after each (re)set
   hand_object_dist_threshold: 0.10 # sim minus demo palm-object distance (m)
-  # Tool/target pos error vs aligned demo (m). Must be BELOW the demo's own
-  # peak object displacement, otherwise "never touch the object" can pass the
-  # whole episode (on brush_027 an untouched brush peaks at ~0.158 m while the
-  # demo peaks at 0.178 m -> 0.25 never fires, ~0.10 fires mid-window).
   object_err_threshold: 0.10
 
 # ---------------------------------- single-step (contextual-bandit) RL (off)
-# Episode-level RL of the IK-IL policy is hard (errors compound). single_step
-# instead samples one demo timestep t per env, inits the full state to q_t,
-# runs ONE control step, and rewards next-frame OBJECT tracking vs q_{t+1}.
-# Use with max_episode_steps=1, max_steps_per_rollout_epoch=1,
-# actor.model.num_action_chunks=1. Mutually exclusive with rsi/early_termination.
-# See rlinf/envs/taco/single_step.py. CPU backend only.
 single_step:
   enabled: False
-  # iid Gaussian noise std added to the hand qpos of EVERY obs frame, so the
-  # policy learns a robust obs->action map (object tracked despite hand offset).
   hand_obs_noise_std: 0.0
-  # also offset the actual initial hand state by the current-frame noise
-  # (physical offset to compensate) vs pure observation noise (denoise only).
   perturb_init_hand: False
   min_frame: 0 # never sample t below this demo frame
 
 # -------------------------------- demo-start short-horizon curriculum RL (off)
-# Like single_step, reset samples a demo timestep t and initializes to q_t with
-# the demo-history obs window. Unlike single_step, the rollout horizon can be
-# >1 and may be changed by EnvWorker's horizon_curriculum below. CPU backend only.
 demo_start:
   enabled: False
   hand_obs_noise_std: 0.0
   perturb_init_hand: False
   min_frame: 0
 
-# EnvWorker-side effective horizon schedule. Keep max_episode_steps and
-# max_steps_per_rollout_epoch set to the largest horizon; when enabled, this
-# schedule lowers the per-reset episode cap early in training and logs
-# env/curriculum_horizon_steps.
+# EnvWorker-side effective horizon schedule (default off).
 horizon_curriculum:
   enabled: False
-  # When enabled, collect only the current curriculum horizon instead of the
-  # max rollout horizon. Disable only to reproduce the old fixed-envelope path.
   collect_current_horizon_only: True
-  # Resize the valid transition pool to the nearest actor.global_batch_size
-  # multiple after advantage/return computation, so PPO can split it into one or
-  # more train global batches without coupling rollout size to batch size.
   sample_to_global_batch_multiple: True
-  # Optional cap on PPO train global batches consumed from one rollout pool.
-  # null means use the whole resized pool; integer M means sample at most
-  # M * actor.global_batch_size transitions per global step.
   max_train_global_batches_per_step: null
   start_horizon: 1
   end_horizon: ${env.train.max_episode_steps}
   milestones: []
 
 # ------------------------------------------------------------------- video
-# Offscreen rendering needs a working GL backend (e.g. MUJOCO_GL=glfw + xvfb).
 video_cfg:
   save_video: False
   info_on_video: False
