@@ -47,12 +47,11 @@ class RobotSpec:
     hand_dim: int
     tool_obj_qpos: slice
     target_obj_qpos: slice
-    mesh_alias: dict = field(default_factory=dict)
+    mesh_alias: dict[str, str] = field(default_factory=dict)
 
 
 ROBOT_SPECS: dict[str, RobotSpec] = {
-    # 44 hand dofs + 2 free-joint objects (nq=58); matches the legacy
-    # HAND_DIM/TOOL_OBJ_QPOS/TARGET_OBJ_QPOS constants in scene.py.
+    # 44 hand dofs + 2 free-joint objects (nq=58).
     "allegro": RobotSpec("allegro", 44, slice(44, 51), slice(51, 58)),
     # 56 hand dofs + 2 free-joint objects (nq=70). The dataset scenes reference
     # 6 fingertip meshes by a baked shared-geometry naming (DP_HB1_*/elastomer_
