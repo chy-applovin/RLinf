@@ -52,27 +52,81 @@ import numpy as np
 
 from rlinf.envs.taco.scene import EpisodeData
 
-__all__ = ["RSISampler", "EarlyTermination"]
+__all__ = ["compute_contact_frame", "RSISampler", "EarlyTermination"]
 
 _VALID_CRITERIA = ("hand_object_distance", "object_tracking")
 
 
+def compute_contact_frame(
+    qpos_demo: np.ndarray,
+    spec,
+    threshold_m: float = 1e-3,
+    which: str = "earliest",
+) -> int:
+    """First demo frame where a manipulated object's translation has moved
+    more than ``threshold_m`` from its frame-0 position (= "object starts
+    moving" = contact). ``which``: ``earliest`` (min of tool/target) | ``tool``
+    | ``target``. Returns a frame in ``[1, T-1]``; returns ``T-1`` if no object
+    ever moves (degenerate demo) so the sampler still has a valid range.
+    """
+    qpos_demo = np.asarray(qpos_demo)
+    num_frames = qpos_demo.shape[0]
+
+    def _first_move(obj_slice: slice) -> int:
+        pos = qpos_demo[:, obj_slice.start : obj_slice.start + 3]
+        disp = np.linalg.norm(pos - pos[0], axis=1)
+        moved = np.nonzero(disp > threshold_m)[0]
+        return int(moved[0]) if moved.size else num_frames - 1
+
+    if which == "tool":
+        cf = _first_move(spec.tool_obj_qpos)
+    elif which == "target":
+        cf = _first_move(spec.target_obj_qpos)
+    elif which == "earliest":
+        cf = min(_first_move(spec.tool_obj_qpos), _first_move(spec.target_obj_qpos))
+    else:
+        raise ValueError(f"unknown contact_object '{which}'")
+    return int(np.clip(cf, 1, num_frames - 1))
+
+
 class RSISampler:
-    """Samples per-reset reference start frames (uniform over the demo)."""
+    """Samples per-reset reference start frames from the demo's PRE-CONTACT
+    window (uniform in [0, contact_frame))."""
 
     def __init__(self, cfg: dict[str, Any] | None, seed: int):
         cfg = dict(cfg) if cfg else {}
         self.enabled = bool(cfg.get("enabled", False))
         # never start so late that fewer than this many control steps remain
         self.min_remaining_steps = int(cfg.get("min_remaining_steps", 8))
+        # object "starts moving" (= contact) when displaced more than this (m)
+        self.contact_threshold_m = float(cfg.get("contact_pos_threshold_m", 1e-3))
+        self.contact_object = str(cfg.get("contact_object", "earliest"))
         self._rng = np.random.default_rng(seed)
+        self._contact_cache: dict[str, int] = {}  # episode.name -> contact frame
 
-    def sample_start_frame(self, num_frames: int) -> int:
-        """Uniform start frame in [0, T-1-min_remaining]; 0 when disabled."""
+    def _high(self, episode: EpisodeData, spec) -> int:
+        """Exclusive upper bound for sampling: before contact AND leaving
+        >= min_remaining_steps before the demo end."""
+        cf = self._contact_cache.get(episode.name)
+        if cf is None:
+            cf = compute_contact_frame(
+                episode.qpos_demo, spec, self.contact_threshold_m, self.contact_object
+            )
+            self._contact_cache[episode.name] = cf
+        return max(min(cf, episode.num_frames - 1 - self.min_remaining_steps), 1)
+
+    def sample_start_frame(self, episode: EpisodeData, spec) -> int:
+        """Pre-contact start frame; 0 when disabled."""
         if not self.enabled:
             return 0
-        high = max(num_frames - 1 - self.min_remaining_steps, 1)
-        return int(self._rng.integers(0, high))
+        return int(self._rng.integers(0, self._high(episode, spec)))
+
+    def sample_start_frames(self, episode: EpisodeData, spec, n: int) -> np.ndarray:
+        """``n`` independent pre-contact start frames (GPU per-world); zeros when
+        disabled."""
+        if not self.enabled:
+            return np.zeros(n, dtype=np.int64)
+        return self._rng.integers(0, self._high(episode, spec), size=n).astype(np.int64)
 
 
 class EarlyTermination:

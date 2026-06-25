@@ -311,7 +311,7 @@ class TacoEnv(gym.Env):
             return self._make_demo_timestep_subenv(episode_id)
         ep, model = self._get_episode(episode_id)
         # DeepMimic RSI: start from a randomly sampled reference frame
-        start_frame = self.rsi.sample_start_frame(ep.num_frames)
+        start_frame = self.rsi.sample_start_frame(ep, self.spec)
         data = mujoco.MjData(model)
         data.qpos[:] = ep.qpos_demo[start_frame]
         data.qvel[:] = ep.qvel_demo[start_frame]

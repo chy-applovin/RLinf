@@ -78,6 +78,8 @@ reward:
 rsi: # Reference State Initialization: start episodes at random demo frames
   enabled: False
   min_remaining_steps: 8 # never start within this many steps of the demo end
+  contact_pos_threshold_m: 1.0e-3 # object "starts moving" when displaced > this (m) from demo frame 0
+  contact_object: earliest # earliest | tool | target -- which object's first motion bounds sampling
 early_termination: # end episodes on unrecoverable failure
   enabled: False
   criteria: ["hand_object_distance"] # and/or "object_tracking"

@@ -21,9 +21,75 @@ No Ray / no GPU required:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import torch
 from omegaconf import OmegaConf
+
+from rlinf.envs.taco.deepmimic import RSISampler, compute_contact_frame
+
+# fake robot spec: tool free-joint at qpos[7:14], target at qpos[14:21]
+_SPEC = SimpleNamespace(tool_obj_qpos=slice(7, 14), target_obj_qpos=slice(14, 21))
+
+
+def _demo_with_motion(tool_move_at, target_move_at, T=100, nq=21):
+    """qpos_demo where tool/target translation jumps 5cm at the given frames."""
+    q = np.zeros((T, nq), dtype=np.float64)
+    if tool_move_at is not None:
+        q[tool_move_at:, 7] = 0.05  # tool x-translation steps to 5cm
+    if target_move_at is not None:
+        q[target_move_at:, 14] = 0.05  # target x-translation steps to 5cm
+    return q
+
+
+def test_contact_frame():
+    # earliest of the two objects
+    q = _demo_with_motion(tool_move_at=30, target_move_at=20)
+    assert compute_contact_frame(q, _SPEC, threshold_m=1e-3, which="earliest") == 20
+    assert compute_contact_frame(q, _SPEC, threshold_m=1e-3, which="tool") == 30
+    assert compute_contact_frame(q, _SPEC, threshold_m=1e-3, which="target") == 20
+    # nothing moves -> T-1
+    q0 = _demo_with_motion(tool_move_at=None, target_move_at=None, T=50)
+    assert compute_contact_frame(q0, _SPEC, threshold_m=1e-3) == 49
+    # constant nonzero offset is NOT motion (guards displacement-from-frame-0
+    # semantics vs distance-from-origin): object sits at 0.05 the whole time.
+    qconst = _demo_with_motion(tool_move_at=0, target_move_at=0)
+    assert compute_contact_frame(qconst, _SPEC, threshold_m=1e-3) == qconst.shape[0] - 1
+    # earliest detectable motion is frame 1 (frame-0 displacement is always 0)
+    q1 = _demo_with_motion(tool_move_at=1, target_move_at=1)
+    assert compute_contact_frame(q1, _SPEC, threshold_m=1e-3) == 1
+    # threshold sensitivity: 5cm step is below a 10cm threshold -> no contact
+    assert compute_contact_frame(q, _SPEC, threshold_m=0.10) == 99
+    print("[contact] compute_contact_frame: OK")
+
+def _fake_episode(qpos_demo, name="ep"):
+    return SimpleNamespace(
+        name=name, qpos_demo=qpos_demo, num_frames=int(qpos_demo.shape[0])
+    )
+
+
+def test_rsi_sampler_unit():
+    q = _demo_with_motion(tool_move_at=40, target_move_at=60)  # contact = 40
+    ep = _fake_episode(q)
+
+    # disabled -> always 0 / zeros
+    off = RSISampler({"enabled": False}, seed=0)
+    assert off.sample_start_frame(ep, _SPEC) == 0
+    assert np.array_equal(off.sample_start_frames(ep, _SPEC, 5), np.zeros(5))
+
+    # enabled -> samples strictly within [0, contact) (min_remaining huge -> contact dominates)
+    on = RSISampler(
+        {"enabled": True, "min_remaining_steps": 8, "contact_pos_threshold_m": 1e-3},
+        seed=0,
+    )
+    frames = on.sample_start_frames(ep, _SPEC, 200)
+    assert frames.dtype == np.int64 and frames.shape == (200,)
+    assert frames.min() >= 0 and frames.max() < 40, frames.max()
+    # per-episode caching: compute_contact_frame called once
+    assert ep.name in on._contact_cache and on._contact_cache[ep.name] == 40
+    print("[contact] RSISampler unit: OK")
+
 
 EP = "brush__brush__bowl__20230927_027"
 
@@ -91,9 +157,13 @@ def test_rsi():
     env = build(make_cfg(rsi={"enabled": True, "min_remaining_steps": 8}), n)
     env.reset()
     demo = env.subenvs[0].episode.qpos_demo
+    from rlinf.envs.taco.deepmimic import compute_contact_frame
+
+    spec = env.subenvs[0].episode.spec
+    contact = compute_contact_frame(demo, spec, threshold_m=1e-3, which="earliest")
     starts = [s.start_frame for s in env.subenvs]
-    assert len(set(starts)) > 4, f"start frames not diverse: {starts}"
-    assert max(starts) <= demo.shape[0] - 1 - 8
+    assert max(starts) < contact, f"start {max(starts)} not before contact {contact}"
+    assert len(set(starts)) > 1, f"start frames not diverse: {starts}"
     # init state == demo[start_frame]
     for s in env.subenvs:
         assert np.allclose(s.data.qpos, demo[s.start_frame], atol=1e-9)
@@ -205,6 +275,8 @@ def test_et_object_tracking():
 
 
 if __name__ == "__main__":
+    test_contact_frame()
+    test_rsi_sampler_unit()
     test_default_off()
     test_rsi()
     test_et_hand_object_distance()
