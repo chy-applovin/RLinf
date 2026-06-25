@@ -41,6 +41,7 @@ import numpy as np
 import torch
 from omegaconf import OmegaConf
 
+from rlinf.envs.taco.deepmimic import RSISampler
 from rlinf.envs.taco.robots import get_robot_spec
 from rlinf.envs.taco.scene import (
     load_episode_data,
@@ -94,9 +95,6 @@ class TacoEnvGPU(gym.Env):
         assert not bool(cfg.auto_reset), "TacoEnvGPU supports auto_reset=False only"
         assert not bool(cfg.video_cfg.save_video), (
             "TacoEnvGPU does not support video capture (use sim_backend: cpu)"
-        )
-        assert not bool((cfg.get("rsi", None) or {}).get("enabled", False)), (
-            "DeepMimic RSI is not implemented in the GPU backend (use sim_backend: cpu)"
         )
         assert not bool(
             (cfg.get("early_termination", None) or {}).get("enabled", False)
@@ -195,12 +193,15 @@ class TacoEnvGPU(gym.Env):
         # ------------------------------------------------- cached GPU tensors
         f32 = dict(dtype=torch.float32, device=self.device)
         self.demo_qpos = torch.as_tensor(self.episode.qpos_demo, **f32)  # (T, nq)
+        self.demo_qvel = torch.as_tensor(self.episode.qvel_demo, **f32)  # (T, nv)
         self.target_local = torch.as_tensor(self.episode.target_local, **f32)
         self.tool_local = (
             torch.as_tensor(self.episode.tool_local, **f32)
             if self.need_tool_cloud
             else None
         )
+        self.rsi = RSISampler(cfg.get("rsi", None) or {}, seed=self.seed + 7)
+        self._start_frames = torch.zeros(self.num_envs, dtype=torch.int64, device=self.device)
 
         # rolling obs history buffers (B, To, ...)
         b, to, k = self.num_envs, self.obs_horizon, self.num_points
@@ -262,24 +263,19 @@ class TacoEnvGPU(gym.Env):
                     self._graph = None
         self._mjwarp = mjwarp
 
-    def _reset_warp_state(self) -> None:
-        """Reset all worlds to demo frame 0 and recompute derived quantities."""
+    def _reset_warp_state(self, start_frames: torch.Tensor) -> None:
+        """Reset each world to its (per-world) demo start frame and recompute
+        derived quantities. start_frames: (B,) int64 on device."""
         wp = self._wp
         b = self.num_envs
         f32 = dict(dtype=torch.float32, device=self.device)
-        qpos0 = torch.as_tensor(self.episode.qpos_demo[0], **f32).repeat(b, 1)
-        qvel0 = torch.as_tensor(self.episode.qvel_demo[0], **f32).repeat(b, 1)
+        qpos0 = self.demo_qpos[start_frames].contiguous()   # (B, nq)
+        qvel0 = self.demo_qvel[start_frames].contiguous()   # (B, nv)
         with wp.ScopedDevice(self._wp_device):
-            wp.copy(self.data_wp.qpos, wp.from_torch(qpos0.contiguous()))
-            wp.copy(self.data_wp.qvel, wp.from_torch(qvel0.contiguous()))
-            wp.copy(
-                self.data_wp.ctrl,
-                wp.from_torch(torch.zeros(b, self.spec.hand_dim, **f32)),
-            )
-            wp.copy(
-                self.data_wp.qacc_warmstart,
-                wp.from_torch(torch.zeros(b, self.model_cpu.nv, **f32)),
-            )
+            wp.copy(self.data_wp.qpos, wp.from_torch(qpos0))
+            wp.copy(self.data_wp.qvel, wp.from_torch(qvel0))
+            wp.copy(self.data_wp.ctrl, wp.from_torch(torch.zeros(b, self.spec.hand_dim, **f32)))
+            wp.copy(self.data_wp.qacc_warmstart, wp.from_torch(torch.zeros(b, self.model_cpu.nv, **f32)))
             wp.copy(self.data_wp.time, wp.from_torch(torch.zeros(b, **f32)))
             self._mjwarp.forward(self.model_wp, self.data_wp)
             wp.synchronize()
@@ -344,18 +340,20 @@ class TacoEnvGPU(gym.Env):
             self.spec.target_obj_qpos,
             self.spec.hand_dim,
         )
-        demo = self.demo_qpos[min(self.steps, self.episode.num_frames - 1)]
+        T = self.episode.num_frames
+        idx = torch.clamp(self._start_frames + self.steps, max=T - 1)   # (B,)
+        demo = self.demo_qpos[idx]                                      # (B, nq)
         tool_err = torch.linalg.norm(
             qpos[:, tool_q.start : tool_q.start + 3]
-            - demo[tool_q.start : tool_q.start + 3],
+            - demo[:, tool_q.start : tool_q.start + 3],
             dim=1,
         )
         target_err = torch.linalg.norm(
             qpos[:, target_q.start : target_q.start + 3]
-            - demo[target_q.start : target_q.start + 3],
+            - demo[:, target_q.start : target_q.start + 3],
             dim=1,
         )
-        hand_err = (qpos[:, :hand_dim] - demo[:hand_dim]).abs().mean(dim=1)
+        hand_err = (qpos[:, :hand_dim] - demo[:, :hand_dim]).abs().mean(dim=1)
         return tool_err, target_err, hand_err
 
     def _compute_rewards(self, qpos: torch.Tensor) -> torch.Tensor:
@@ -376,7 +374,25 @@ class TacoEnvGPU(gym.Env):
         seed: Optional[Union[int, list[int]]] = None,
         options: Optional[dict] = None,
     ):
-        self._reset_warp_state()
+        start_frames = torch.as_tensor(
+            self.rsi.sample_start_frames(self.episode, self.spec, self.num_envs),
+            dtype=torch.int64, device=self.device,
+        )
+        self._start_frames = start_frames
+        T = self.episode.num_frames
+        # RSI horizon model = "shared" (Option B): all worlds advance the SAME number
+        # of control steps (scalar self.steps / self.ep_len); only the per-world demo
+        # alignment offset (self._start_frames) differs. This is numerically equivalent
+        # to per-world episode lengths ONLY while ep_len is capped by max_episode_steps
+        # (i.e. T-1-start >= max_episode_steps for every sampled start). Because RSI
+        # start frames are constrained to the PRE-CONTACT window (early, small indices)
+        # and demos are long, that holds here. RISK: if max_episode_steps is raised (or
+        # a demo is short) such that a late-start world would run past the demo end, the
+        # clamped demo alignment makes that world track the final demo frame instead of
+        # terminating per-world as the CPU backend does. Revisit with per-world done
+        # (Option A) if that regime is needed.
+        self.ep_len = min(self.max_episode_steps, T - 1 - int(start_frames.max()))
+        self._reset_warp_state(start_frames)
         self.steps = 0
         self._returns.zero_()
         for buf in (self._final_tool_err, self._final_target_err, self._final_hand_err):
