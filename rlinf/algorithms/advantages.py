@@ -86,6 +86,65 @@ def compute_gae_advantages_and_returns(
     return advantages, returns
 
 
+@register_advantage("ppo_return_as_adv")
+def compute_return_as_advantages_and_returns(
+    rewards: torch.Tensor,
+    gamma: float = 1.0,
+    normalize_advantages: bool = True,
+    normalize_returns: bool = False,
+    loss_mask: Optional[torch.Tensor] = None,
+    dones: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Critic-free advantage estimation that uses the per-step return as advantage.
+
+    This backs the ``PPO_with_return_as_adv`` algorithm. The policy-gradient
+    objective is identical to PPO, but no value function is involved at any point:
+    every step's advantage is simply the discounted Monte-Carlo return-to-go
+
+        adv_t = G_t = sum_{k >= t} gamma^{k - t} * r_k
+
+    where the accumulation is reset at episode boundaries (via ``dones``). Because
+    there is no critic, this avoids value-function bias/error early in training,
+    at the cost of higher-variance advantages.
+
+    NOTE: ``values`` is intentionally unused here (no bootstrapping, no critic).
+
+    Args:
+        rewards (torch.Tensor): Rewards per timestep. Shape: [seq_len, bsz].
+        gamma (float, optional): Discount factor. Defaults to 1.0.
+        normalize_advantages (bool, optional): Whether to whiten advantages over
+            valid entries. Defaults to True (mirrors GAE/PPO behavior).
+        normalize_returns (bool, optional): Whether to whiten returns. Defaults to False.
+        loss_mask (Optional[torch.Tensor]): Mask of valid entries. Shape: [seq_len, bsz].
+        dones (torch.Tensor): Done flags (1 if episode ended, else 0).
+            Shape: [seq_len + 1, bsz].
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: (advantages, returns), each [seq_len, bsz].
+            ``returns`` carries the raw (un-normalized) return-to-go for logging; it
+            is not consumed by the critic-free actor loss.
+    """
+    T = rewards.shape[0]
+    returns = torch.zeros_like(rewards)
+    running_return = torch.zeros_like(rewards[0])
+
+    for step in reversed(range(T)):
+        # Reset the carried return-to-go across episode boundaries so a new
+        # episode does not leak return from the previous one.
+        not_done = (~dones[step + 1]) if dones is not None else 1.0
+        running_return = rewards[step] + gamma * not_done * running_return
+        returns[step] = running_return
+
+    advantages = returns
+    if normalize_advantages:
+        advantages = safe_normalize(advantages, loss_mask=loss_mask)
+    if normalize_returns:
+        returns = safe_normalize(returns, loss_mask=loss_mask)
+
+    return advantages, returns
+
+
 @register_advantage("grpo")
 def compute_grpo_advantages(
     rewards: torch.Tensor,
