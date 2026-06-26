@@ -270,7 +270,7 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
             sigmas = self.noise_level * torch.sqrt(timesteps / (1.0 - denom))[:-1]
             sigma_i = sigmas[idx][:, None, None].expand_as(x_t)
             data_w = 1.0 - (s_e - d_e)
-            noise_w = (s_e - d_e) - sigma_i**2 * d_e / (2.0 * s_e)
+            noise_w = (s_e - d_e) - sigma_i**2 * d_e / (2.0 * s_e) * math.sqrt(self.noise_level) / self.noise_level**2
             std = torch.sqrt(d_e) * sigma_i
         elif sample_method == "flow_cps":
             cos_term = math.cos(math.pi * self.noise_level / 2.0)
@@ -280,6 +280,7 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
             std = (s_e - d_e) * sin_term
         else:
             raise ValueError(f"Invalid noise method: {sample_method}")
+        # import pdb; pdb.set_trace()
 
         mean = data_pred * data_w + noise_pred * noise_w
         return mean, std
