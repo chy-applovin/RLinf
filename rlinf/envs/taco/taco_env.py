@@ -50,8 +50,6 @@ from rlinf.envs.taco.deepmimic import EarlyTermination, RSISampler
 from rlinf.envs.taco.rewards import BaseTacoReward, build_reward
 from rlinf.envs.taco.scene import (
     HAND_DIM,
-    TARGET_OBJ_QPOS,
-    TOOL_OBJ_QPOS,
     EpisodeData,
     load_episode_data,
     select_episodes,
@@ -153,6 +151,9 @@ class TacoEnv(gym.Env):
         self.need_tool_cloud = self.obs_mode == "pc2_qpos"
         self.obs_horizon = int(cfg.obs_horizon)
         self.num_points = int(cfg.num_points)
+        self.hand_dim = int(cfg.get("hand_dim", HAND_DIM))
+        if self.hand_dim <= 0:
+            raise ValueError(f"hand_dim must be positive, got {self.hand_dim}")
         self.max_episode_steps = int(cfg.max_episode_steps)
         self.success_threshold_m = float(cfg.get("success_threshold_m", 0.1))
 
@@ -177,7 +178,14 @@ class TacoEnv(gym.Env):
         # process is enough (links are content-stable across episodes).
         scene_root = Path(cfg.scene_root) / f"proc_{seed_offset}"
         self._scene_root = scene_root
-        self._allegro_assets = Path(cfg.allegro_assets_root)
+        self._robot_assets = Path(cfg.allegro_assets_root)
+        self._robot_name = str(cfg.get("robot_name", "allegro"))
+        self._robot_asset_glob = str(cfg.get("robot_asset_glob", "*.stl"))
+        self._pointcloud_dir = str(cfg.get("pointcloud_dir", "pointcloud"))
+        aliases = cfg.get("robot_asset_aliases", {}) or {}
+        if OmegaConf.is_config(aliases):
+            aliases = OmegaConf.to_container(aliases, resolve=True)
+        self._robot_asset_aliases = dict(aliases)
         self._episode_cache: dict[str, tuple[EpisodeData, mujoco.MjModel]] = {}
 
         # ------------------------------------------------------------- reward
@@ -282,14 +290,19 @@ class TacoEnv(gym.Env):
             ep = load_episode_data(
                 ep_dir,
                 self._scene_root,
-                self._allegro_assets,
+                self._robot_assets,
                 self.trajectory_file,
                 self.num_points,
                 self.need_tool_cloud,
+                hand_dim=self.hand_dim,
+                pointcloud_dir=self._pointcloud_dir,
+                robot_name=self._robot_name,
+                robot_asset_glob=self._robot_asset_glob,
+                robot_asset_aliases=self._robot_asset_aliases,
             )
             model = mujoco.MjModel.from_xml_path(ep.scene_xml)
-            assert model.nu == HAND_DIM, (
-                f"{key}: expected nu={HAND_DIM}, got {model.nu}"
+            assert model.nu == ep.hand_dim, (
+                f"{key}: expected nu={ep.hand_dim} from env.hand_dim, got {model.nu}"
             )
             self._episode_cache[key] = (ep, model)
         return self._episode_cache[key]
@@ -338,11 +351,11 @@ class TacoEnv(gym.Env):
         sampler = self._demo_timestep_sampler
         ep, model = self._get_episode(episode_id)
         t = sampler.sample_timestep(ep.num_frames, horizon_steps=self.max_episode_steps)
-        noise = sampler.sample_hand_noise(self.obs_horizon)
+        noise = sampler.sample_hand_noise(self.obs_horizon, ep.hand_dim)
         data = mujoco.MjData(model)
         data.qpos[:] = ep.qpos_demo[t]
         if sampler.perturb_init_hand:
-            data.qpos[:HAND_DIM] += noise[-1]
+            data.qpos[: ep.hand_dim] += noise[-1]
         data.qvel[:] = ep.qvel_demo[t]
         mujoco.mj_forward(model, data)
         substeps = max(1, round((1.0 / ep.frequency) / float(model.opt.timestep)))
@@ -411,33 +424,36 @@ class TacoEnv(gym.Env):
     def _record_final_errors(self, sub: _SubEnv) -> None:
         sim = sub.data.qpos
         demo = sub.demo_qpos(sub.steps)
+        tool_obj_qpos = sub.episode.tool_obj_qpos
+        target_obj_qpos = sub.episode.target_obj_qpos
+        hand_dim = sub.episode.hand_dim
         sub.final_tool_err = float(
             np.linalg.norm(
-                sim[TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
-                - demo[TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
+                sim[tool_obj_qpos.start : tool_obj_qpos.start + 3]
+                - demo[tool_obj_qpos.start : tool_obj_qpos.start + 3]
             )
         )
         sub.final_target_err = float(
             np.linalg.norm(
-                sim[TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
-                - demo[TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
+                sim[target_obj_qpos.start : target_obj_qpos.start + 3]
+                - demo[target_obj_qpos.start : target_obj_qpos.start + 3]
             )
         )
-        sub.final_hand_err = float(np.abs(sim[:HAND_DIM] - demo[:HAND_DIM]).mean())
+        sub.final_hand_err = float(np.abs(sim[:hand_dim] - demo[:hand_dim]).mean())
 
     def step(self, actions, build_obs: bool = True):
-        """Execute one 44-dim qpos-target action per sub-env.
+        """Execute one hand-qpos-target action per sub-env.
 
         Args:
-            actions: (num_envs, 44) array of hand qpos targets.
+            actions: (num_envs, hand_dim) array of hand qpos targets.
             build_obs: skip the (relatively expensive) stacked-obs assembly for
                 intermediate chunk steps; only the last step of a chunk needs it.
         """
         if isinstance(actions, torch.Tensor):
             actions = actions.detach().cpu().float().numpy()
         actions = np.asarray(actions, dtype=np.float64)
-        assert actions.shape == (self.num_envs, HAND_DIM), (
-            f"expected actions ({self.num_envs}, {HAND_DIM}), got {actions.shape}"
+        assert actions.shape == (self.num_envs, self.hand_dim), (
+            f"expected actions ({self.num_envs}, {self.hand_dim}), got {actions.shape}"
         )
 
         results = list(
@@ -463,12 +479,12 @@ class TacoEnv(gym.Env):
         return obs, rewards, terminations, truncations, infos
 
     def chunk_step(self, chunk_actions):
-        """Execute a (num_envs, chunk, 44) action chunk; RLinf EnvWorker API."""
+        """Execute a (num_envs, chunk, hand_dim) action chunk."""
         if isinstance(chunk_actions, torch.Tensor):
             chunk_actions = chunk_actions.detach().cpu().float().numpy()
         chunk_actions = np.asarray(chunk_actions)
-        assert chunk_actions.ndim == 3 and chunk_actions.shape[2] == HAND_DIM, (
-            f"expected (B, chunk, {HAND_DIM}), got {chunk_actions.shape}"
+        assert chunk_actions.ndim == 3 and chunk_actions.shape[2] == self.hand_dim, (
+            f"expected (B, chunk, {self.hand_dim}), got {chunk_actions.shape}"
         )
         chunk_size = chunk_actions.shape[1]
 

@@ -841,6 +841,19 @@ def validate_embodied_cfg(cfg):
             f"Current value: {add_value_head}"
         )
 
+    # PPO_with_return_as_adv: a critic-free variant of PPO that uses the per-step
+    # discounted return-to-go directly as the advantage. No value function is
+    # involved, so it must be paired with a critic-free loss (e.g. "actor").
+    if cfg.algorithm.adv_type == "ppo_return_as_adv":
+        assert cfg.algorithm.loss_type not in (
+            "actor_critic",
+            "decoupled_actor_critic",
+        ), (
+            "algorithm.adv_type='ppo_return_as_adv' is a critic-free algorithm "
+            "(no value function); pair it with a critic-free loss such as "
+            f"algorithm.loss_type='actor'. Got loss_type='{cfg.algorithm.loss_type}'."
+        )
+
     # process num-envs
     component_placement = HybridComponentPlacement(cfg, Cluster())
     stage_num = cfg.rollout.pipeline_stage_num
