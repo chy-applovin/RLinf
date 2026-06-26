@@ -953,6 +953,7 @@ class EnvWorker(Worker):
             int(record["render_width"]),
             int(step),
             float(ret),
+            int(record.get("start_frame", 0)),
         )
 
     @staticmethod
@@ -964,6 +965,7 @@ class EnvWorker(Worker):
         render_width: int,
         step: int,
         ret: float,
+        start_frame: int = 0,
     ) -> None:
         np.savez_compressed(
             path,
@@ -973,6 +975,7 @@ class EnvWorker(Worker):
             render_width=render_width,
             step=step,
             ret=ret,
+            start_frame=start_frame,
         )
 
     @Worker.timer("env/send_obs")

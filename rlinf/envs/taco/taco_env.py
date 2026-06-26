@@ -674,6 +674,7 @@ class TacoEnv(gym.Env):
             records.append(
                 {
                     "episode": episode_dir.name,
+                    "start_frame": int(sub.start_frame),
                     "qpos": [sub.data.qpos.copy()],
                 }
             )
@@ -703,6 +704,7 @@ class TacoEnv(gym.Env):
         return {
             "qpos": np.stack(rec["qpos"]).astype(np.float32),  # [T+1, nq]
             "episode": rec["episode"],
+            "start_frame": int(rec.get("start_frame", 0)),
             "render_height": int(self._render_size[0]),
             "render_width": int(self._render_size[1]),
         }
