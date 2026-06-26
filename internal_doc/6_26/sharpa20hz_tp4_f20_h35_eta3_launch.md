@@ -46,3 +46,15 @@ EMBODIED_PATH=/root/RLinf/examples/embodiment /root/RLinf/.venv/bin/python /root
 ```bash
 EMBODIED_PATH=/root/RLinf/examples/embodiment /root/RLinf/.venv/bin/python /root/RLinf/examples/embodiment/train_embodied_agent.py --config-path /root/RLinf/examples/embodiment/config --config-name taco_sharpa20hz_tp4_return_as_adv_box_f20_h35_eta3.yaml
 ```
+
+
+## Active Launch Status
+
+Launched from commit `0cc9e290` and pushed to `fork/feat/ppo-return-as-adv` before training start. Effective launches use `setsid -f` so they survive the Codex command session.
+
+| Run | PID | GPUs | W&B URL | Status at check |
+| --- | ---: | --- | --- | --- |
+| `sharpa20hz-tp4-helmet-ppo-f20-h35-eta3-gbs128` | 4089974 | 0-1 | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/j5emmbre | alive, reached global step 10 |
+| `sharpa20hz-tp4-helmet-retadv-f20-h35-eta3-gbs128` | 4095644 | 2-3 | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/kwxezbjj | alive, reached global step 8 |
+| `sharpa20hz-tp4-box-ppo-f20-h35-eta3-gbs128` | 4102536 | 4-5 | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/n0nwtdwa | alive, reached global step 6 |
+| `sharpa20hz-tp4-box-retadv-f20-h35-eta3-gbs128` | 4109116 | 6-7 | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/1g3zhioq | alive, reached global step 4 |
