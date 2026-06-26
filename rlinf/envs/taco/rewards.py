@@ -41,6 +41,27 @@ if TYPE_CHECKING:
     from rlinf.envs.taco.taco_env import _SubEnv
 
 
+def _object_motion_onset(
+    qpos_demo: np.ndarray, obj_slice: slice, threshold_m: float
+) -> int:
+    """First demo frame where an object's position leaves its rest pose.
+
+    Returns the smallest frame index ``t`` such that the object's translation
+    (the first 3 dofs of its free-joint qpos slice) has moved more than
+    ``threshold_m`` metres away from its demo-frame-0 position. If the object
+    never moves that far in the whole demo, returns ``len(qpos_demo)`` so the
+    caller treats it as "never moves" (gate stays off for the episode).
+
+    The onset is absolute (relative to demo frame 0), so it is independent of
+    any RSI start frame: an episode that starts after the onset is already
+    "moving" and its object reward is active from the first step.
+    """
+    pos = qpos_demo[:, obj_slice.start : obj_slice.start + 3]
+    disp = np.linalg.norm(pos - pos[0], axis=1)
+    moved = np.flatnonzero(disp > threshold_m)
+    return int(moved[0]) if moved.size else int(qpos_demo.shape[0])
+
+
 class BaseTacoReward(ABC):
     """Per-step reward interface.
 
@@ -155,16 +176,28 @@ class _ContactRef:
 class TrackingReward(BaseTacoReward):
     """Dense demo-tracking reward (+ optional contact-consistency term).
 
-    r_t = [ w_tool    * exp(-|tool_pos   - demo_tool_pos|   / s_tool)
-          + w_target  * exp(-|target_pos - demo_target_pos| / s_target)
-          + w_hand    * exp(-mean|hand_qpos - demo_hand_qpos| / s_hand)
-          + w_contact * contact_match_t ] / W
+    r_t = [ g_tool   * w_tool    * exp(-|tool_pos   - demo_tool_pos|   / s_tool)
+          + g_target * w_target  * exp(-|target_pos - demo_target_pos| / s_target)
+          +            w_hand    * exp(-mean|hand_qpos - demo_hand_qpos| / s_hand)
+          +            w_contact * contact_match_t ] / W
 
     where W = sum of the active weights when ``normalize_by_weights`` (default),
     so the per-step reward is bounded in (0, 1] and the episode return scales
     with how long the rollout stays on the demo trajectory. Executed step k
     (1-based) is compared against demo frame min(k, T-1), matching the
     dataset's action_offset=1 convention.
+
+    **Motion gate** (``obj_motion_gate`` = True, default False): g_tool / g_target
+    are 0 until the respective object actually starts moving in the demo and 1
+    afterwards. An object's onset is the first demo frame whose position has
+    moved more than ``obj_motion_threshold_m`` (default 0.01 m) from its demo
+    frame-0 rest pose; the gate latches on at that frame (the demo frame only
+    advances) and the onset is absolute, so an RSI start past the onset is
+    already "moving". This stops the policy from collecting near-max object
+    reward for trivially tracking a stationary object during the approach phase.
+    W is unchanged, so a gated-off object term contributes exactly 0 (a gated
+    step's reward is just the hand term, plus contact if enabled). An object
+    that never moves > threshold in the demo stays gated off all episode.
 
     **Contact-consistency term** (``contact_weight`` > 0, default 0 = off; cf.
     Spider's contact reward / DeepMimic-style reference matching): for each
@@ -195,10 +228,41 @@ class TrackingReward(BaseTacoReward):
             if bool(cfg.get("normalize_by_weights", True))
             else 1.0
         )
+        # Motion gate (default off): zero an object's tracking term until that
+        # object actually starts moving in the demo, so the policy is not paid
+        # for trivially "tracking" a stationary object during the approach
+        # phase. Latched per object from its absolute demo onset frame; W is
+        # left unchanged so a gated-off term contributes exactly 0.
+        self.obj_motion_gate = bool(cfg.get("obj_motion_gate", False))
+        self.obj_motion_threshold_m = float(cfg.get("obj_motion_threshold_m", 0.01))
         # contact references are built lazily per episode (compute() runs in
         # the env's thread pool -> guard the cache with a lock)
         self._contact_refs: dict[str, _ContactRef] = {}
         self._contact_lock = threading.Lock()
+        # per-episode (tool_onset, target_onset) demo frames, built lazily
+        self._motion_onsets: dict[str, tuple[int, int]] = {}
+        self._motion_lock = threading.Lock()
+
+    def _get_motion_onsets(self, sub: "_SubEnv") -> tuple[int, int]:
+        """Cached (tool_onset, target_onset) demo frames for this episode."""
+        key = sub.episode.name
+        onsets = self._motion_onsets.get(key)
+        if onsets is None:
+            with self._motion_lock:
+                onsets = self._motion_onsets.get(key)
+                if onsets is None:
+                    spec = sub.episode.spec
+                    demo = sub.episode.qpos_demo
+                    onsets = (
+                        _object_motion_onset(
+                            demo, spec.tool_obj_qpos, self.obj_motion_threshold_m
+                        ),
+                        _object_motion_onset(
+                            demo, spec.target_obj_qpos, self.obj_motion_threshold_m
+                        ),
+                    )
+                    self._motion_onsets[key] = onsets
+        return onsets
 
     def _get_contact_ref(self, sub: "_SubEnv") -> _ContactRef:
         key = sub.episode.name
@@ -236,15 +300,26 @@ class TrackingReward(BaseTacoReward):
         )
         hand_err = float(np.abs(sim[:hand_dim] - demo[:hand_dim]).mean())
 
+        # Motion gate: 0 until the object's demo onset frame is reached, 1 after
+        # (latched -- the demo frame only advances). Hand term is never gated.
+        tool_gate = target_gate = 1.0
+        if self.obj_motion_gate:
+            tool_onset, target_onset = self._get_motion_onsets(sub)
+            frame = sub.demo_frame
+            tool_gate = 1.0 if frame >= tool_onset else 0.0
+            target_gate = 1.0 if frame >= target_onset else 0.0
+
         weighted_sum = (
-            self.w_tool * np.exp(-tool_err / self.s_tool)
-            + self.w_target * np.exp(-target_err / self.s_target)
+            tool_gate * self.w_tool * np.exp(-tool_err / self.s_tool)
+            + target_gate * self.w_target * np.exp(-target_err / self.s_target)
             + self.w_hand * np.exp(-hand_err / self.s_hand)
         )
         info = {
             "tool_pos_err": tool_err,
             "target_pos_err": target_err,
             "hand_qpos_err": hand_err,
+            "tool_gate": tool_gate,
+            "target_gate": target_gate,
         }
 
         if self.w_contact > 0.0:

@@ -42,6 +42,7 @@ import torch
 from omegaconf import OmegaConf
 
 from rlinf.envs.taco.deepmimic import RSISampler
+from rlinf.envs.taco.rewards import _object_motion_onset
 from rlinf.envs.taco.robots import get_robot_spec
 from rlinf.envs.taco.scene import (
     load_episode_data,
@@ -170,6 +171,24 @@ class TacoEnvGPU(gym.Env):
             (self.w_tool + self.w_target + self.w_hand)
             if bool(reward_cfg.get("normalize_by_weights", True))
             else 1.0
+        )
+        # Motion gate (default off): zero an object's tracking term until it
+        # starts moving in the demo. Same semantics as the CPU TrackingReward --
+        # latched per object from its absolute demo onset frame, W unchanged.
+        # Single episode broadcast across worlds, so the onsets are scalars; the
+        # gate becomes per-world because RSI start frames differ (see
+        # _compute_rewards).
+        self.obj_motion_gate = bool(reward_cfg.get("obj_motion_gate", False))
+        self.obj_motion_threshold_m = float(
+            reward_cfg.get("obj_motion_threshold_m", 0.01)
+        )
+        self.tool_onset = _object_motion_onset(
+            self.episode.qpos_demo, self.spec.tool_obj_qpos, self.obj_motion_threshold_m
+        )
+        self.target_onset = _object_motion_onset(
+            self.episode.qpos_demo,
+            self.spec.target_obj_qpos,
+            self.obj_motion_threshold_m,
         )
 
         # --------------------------------------------------------- simulator
@@ -360,9 +379,17 @@ class TacoEnvGPU(gym.Env):
         if self.reward_type == "zero":
             return torch.zeros(self.num_envs, device=self.device)
         tool_err, target_err, hand_err = self._errors(qpos)
+        tool_gate = target_gate = 1.0
+        if self.obj_motion_gate:
+            # Per-world demo frame (matches _errors): RSI start frames differ, so
+            # a world that starts past an onset is already "moving".
+            T = self.episode.num_frames
+            frame = torch.clamp(self._start_frames + self.steps, max=T - 1)  # (B,)
+            tool_gate = (frame >= self.tool_onset).to(qpos.dtype)
+            target_gate = (frame >= self.target_onset).to(qpos.dtype)
         reward = (
-            self.w_tool * torch.exp(-tool_err / self.s_tool)
-            + self.w_target * torch.exp(-target_err / self.s_target)
+            tool_gate * self.w_tool * torch.exp(-tool_err / self.s_tool)
+            + target_gate * self.w_target * torch.exp(-target_err / self.s_target)
             + self.w_hand * torch.exp(-hand_err / self.s_hand)
         ) / self.reward_norm
         return reward

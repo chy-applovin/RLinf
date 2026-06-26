@@ -65,7 +65,7 @@ num_threads: 0            # physics thread pool; 0 -> min(num_envs, 16)
 reward:
   type: tracking
   tool_pos_weight: 2.0
-  target_pos_weight: 0.5
+  target_pos_weight: 2.0
   hand_qpos_weight: 0.1
   tool_pos_scale: 0.05    # meters
   target_pos_scale: 0.05  # meters
@@ -73,6 +73,12 @@ reward:
   # Contact-consistency term (anti reward-hacking; CPU backend only).
   contact_weight: 0.0
   contact_dist_tol: 1.0e-3 # a contact counts as touching when dist < tol (m)
+  # Motion gate (anti reward-hacking): zero an object's tracking term until it
+  # actually starts moving in the demo (latched at the first demo frame whose
+  # position leaves its rest pose by > threshold), so the policy is not paid for
+  # trivially tracking a stationary object during the approach phase.
+  obj_motion_gate: false
+  obj_motion_threshold_m: 0.01 # demo displacement (m) that turns the gate on
 
 # -------------------------------------- DeepMimic training aids (default off)
 rsi: # Reference State Initialization: start episodes at random demo frames
