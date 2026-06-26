@@ -86,6 +86,73 @@ def compute_gae_advantages_and_returns(
     return advantages, returns
 
 
+@register_advantage("grpo_step")
+def compute_grpo_step_advantages(
+    rewards: torch.Tensor,
+    dones: torch.Tensor,
+    group_size: int,
+    group_shared: bool = False,
+    gamma: float = 1.0,
+    loss_mask: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-step, group-relative advantage for value-free RL.
+
+    Computes the undiscounted reward-to-go (same as the critic-free GAE path),
+    then subtracts the per-timestep within-group mean as the baseline. Every env
+    in a contiguous ``group_size`` GRPO group shares one start state (group-shared
+    RSI), so the group-mean is the per-state value ``V(s_start)`` at t=0 and a
+    valid action-independent baseline thereafter.
+
+    ``group_shared`` is required: without it the envs in a group start from
+    different states, so the within-group mean mixes start-state difficulty and
+    silently changes the method. Use a different ``adv_type`` in that case rather
+    than relying on a whole-batch fallback.
+
+    Args:
+        rewards: ``[n_steps, bsz]`` per-step rewards.
+        dones: ``[n_steps + 1, bsz]`` done flags.
+        group_size: contiguous GRPO group width (envs per group) along the env
+            dim. ``num_groups = bsz / group_size``. Must be > 1 (``group_size == 1``
+            makes the group-mean equal each env's own return, so the advantage is
+            identically zero). To treat the whole batch as one group, set
+            ``group_size == bsz``.
+        group_shared: whether each group shares one start state (per-state baseline).
+            Must be True for ``grpo_step``.
+
+    Returns:
+        ``(advantages, returns)``, both ``[n_steps, bsz]``.
+    """
+    T = rewards.shape[0]
+    returns = torch.zeros_like(rewards)
+    running = torch.zeros_like(rewards[0])
+    for step in reversed(range(T)):
+        running = rewards[step] + gamma * (~dones[step + 1]) * running
+        returns[step] = running
+
+    bsz = returns.shape[1]
+    assert group_shared, (
+        "grpo_step requires group-shared RSI (env.train.rsi.group_shared=True): "
+        "the per-timestep baseline is the within-group mean, which is only a valid "
+        "per-state baseline when every env in a group shares one start state. "
+        "Without it, choose a different algorithm.adv_type."
+    )
+    assert group_size > 1, (
+        "grpo_step needs group_size > 1; group_size == 1 makes the group-mean "
+        "equal each env's own return, so the advantage is identically zero. "
+        "To use the whole batch as one group, set group_size == total_num_envs."
+    )
+    assert bsz % group_size == 0, (
+        f"batch size {bsz} is not divisible by group_size {group_size}."
+    )
+    num_groups = bsz // group_size
+    grouped = returns.reshape(T, num_groups, group_size)
+    baseline = grouped.mean(dim=2, keepdim=True)
+    advantages = (grouped - baseline).reshape(T, bsz)
+
+    return advantages, returns
+
+
 @register_advantage("grpo")
 def compute_grpo_advantages(
     rewards: torch.Tensor,
