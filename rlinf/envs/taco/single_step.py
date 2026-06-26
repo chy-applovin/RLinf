@@ -78,13 +78,14 @@ class DemoTimestepSampler:
         with self._rng_lock:
             return int(self._rng.integers(lo, hi + 1))
 
-    def sample_hand_noise(self, obs_horizon: int) -> np.ndarray:
-        """(To, HAND_DIM) iid Gaussian hand-qpos noise; zeros when std <= 0."""
+    def sample_hand_noise(self, obs_horizon: int, hand_dim: int = HAND_DIM) -> np.ndarray:
+        """(To, hand_dim) iid Gaussian hand-qpos noise; zeros when std <= 0."""
+        hand_dim = int(hand_dim)
         if self.hand_obs_noise_std <= 0.0:
-            return np.zeros((obs_horizon, HAND_DIM), dtype=np.float64)
+            return np.zeros((obs_horizon, hand_dim), dtype=np.float64)
         with self._rng_lock:
             return self._rng.normal(
-                0.0, self.hand_obs_noise_std, size=(obs_horizon, HAND_DIM)
+                0.0, self.hand_obs_noise_std, size=(obs_horizon, hand_dim)
             )
 
     def build_obs_history(
@@ -115,7 +116,9 @@ class DemoTimestepSampler:
             return frame
         noised = dict(frame)
         with self._rng_lock:
-            noise = self._rng.normal(0.0, self.hand_obs_noise_std, size=(HAND_DIM,))
+            noise = self._rng.normal(
+                0.0, self.hand_obs_noise_std, size=(frame["qpos"].shape[0],)
+            )
         noised["qpos"] = (noised["qpos"] + noise).astype(np.float32)
         return noised
 
