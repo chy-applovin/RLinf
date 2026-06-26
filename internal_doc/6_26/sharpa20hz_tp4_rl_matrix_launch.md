@@ -65,3 +65,16 @@ EMBODIED_PATH=/root/RLinf/examples/embodiment /root/RLinf/.venv/bin/python /root
 - Hydra resolve passed for all four configs; resolved snapshots are archived in `internal_doc/6_26/resolved_sharpa20hz_tp4_rl_matrix/`.
 - PPO smoke passed with `8` envs, `4` control steps, `max_epochs=1`: return `3.890`, reward `0.973`, final target/tool errors `0.00145m/0.00034m`.
 - PPO_with_return_as_adv smoke passed with the same small setup: return `3.888`, reward `0.972`, no critic metrics logged.
+
+## Active Launch Status
+
+Launched from commit `44562e8194975c4a51c78055a068d48e19f1b6b4` and pushed to `fork/feat/ppo-return-as-adv`.
+
+| Effective run | PID | GPUs | W&B URL | Status at check |
+| --- | ---: | --- | --- | --- |
+| `sharpa20hz-tp4-helmet-ppo-step0-h96-gbs128` | 2666976 | 0-1 | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/wprfe2ti | alive, reached global step 8 |
+| `sharpa20hz-tp4-helmet-retadv-step0-h96-gbs128` | 2666977 | 2-3 | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/mhupnmps | alive, reached global step 8 |
+| `sharpa20hz-tp4-box-ppo-step0-h68-gbs128-retry1` | 2749851 | 4-5 | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/bhpskg7o | alive, reached global step 3 |
+| `sharpa20hz-tp4-box-retadv-step0-h68-gbs128` | 2666979 | 6-7 | https://wandb.ai/hanyang-chen-app-applovin/taco-allegro-flow-rl/runs/r4yzvb2f | alive, reached global step 11 |
+
+The first `box PPO` launch (`sharpa20hz-tp4-box-ppo-step0-h68-gbs128`, PID 2666978, W&B run `gcs2myon`) hit a Ray/Gloo collective worker abort immediately after its first rollout and was terminated. It was restarted as `retry1` after GPUs 4-5 were free; the retry entered normal training.
