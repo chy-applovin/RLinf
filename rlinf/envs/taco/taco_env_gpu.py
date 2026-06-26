@@ -374,9 +374,25 @@ class TacoEnvGPU(gym.Env):
         seed: Optional[Union[int, list[int]]] = None,
         options: Optional[dict] = None,
     ):
+        if self.rsi.enabled and self.rsi.group_shared:
+            # One shared start frame per GRPO group (group = contiguous worlds), so a
+            # group is stochastic rollouts from one identical initial state. This makes
+            # the GRPO group-mean a per-state baseline V(s_start), cancelling the RSI
+            # start-frame difficulty bias in the advantage.
+            assert self.num_envs % self.group_size == 0, (
+                f"num_envs={self.num_envs} not divisible by group_size={self.group_size}"
+            )
+            num_group = self.num_envs // self.group_size
+            group_frames = self.rsi.sample_start_frames(
+                self.episode, self.spec, num_group
+            )
+            frames_np = np.repeat(group_frames, self.group_size)
+        else:
+            frames_np = self.rsi.sample_start_frames(
+                self.episode, self.spec, self.num_envs
+            )
         start_frames = torch.as_tensor(
-            self.rsi.sample_start_frames(self.episode, self.spec, self.num_envs),
-            dtype=torch.int64, device=self.device,
+            frames_np, dtype=torch.int64, device=self.device,
         )
         self._start_frames = start_frames
         T = self.episode.num_frames

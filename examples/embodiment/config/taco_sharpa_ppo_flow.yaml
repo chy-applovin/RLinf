@@ -99,6 +99,7 @@ env:
   # Override the default values in env/taco_brush_sharpa
   train:
     total_num_envs: 32
+    group_size: ${algorithm.group_size}  # single source of truth: env grouping follows the GRPO group
     max_episode_steps: 160
     max_steps_per_rollout_epoch: 160
   eval:

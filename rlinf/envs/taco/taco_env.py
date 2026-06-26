@@ -314,12 +314,42 @@ class TacoEnv(gym.Env):
             self._et_cache[ep.name] = EarlyTermination(self._et_cfg, model, ep)
         return self._et_cache[ep.name]
 
-    def _make_subenv(self, episode_id: int) -> _SubEnv:
+    def _sample_group_start_frames(self) -> list[Optional[int]]:
+        """Per-env RSI start frames for the upcoming reset.
+
+        With ``rsi.group_shared`` on, every env in a GRPO group starts from the
+        SAME reference frame (and, since ``reset_state_ids`` is group-aligned, the
+        SAME episode), so the group is a set of stochastic rollouts from one shared
+        initial state -- making the GRPO group-mean a per-state baseline V(s_start)
+        that cancels the RSI start-frame difficulty bias. Otherwise returns ``None``
+        per env, letting ``_make_subenv`` sample each independently (legacy).
+        """
+        if (
+            not self.rsi.enabled
+            or not self.rsi.group_shared
+            or self._demo_timestep_sampler.enabled
+        ):
+            return [None] * self.num_envs
+        frames: list[Optional[int]] = [None] * self.num_envs
+        for g in range(self.num_group):
+            base = g * self.group_size
+            ep, _ = self._get_episode(int(self.reset_state_ids[base]))
+            frame = self.rsi.sample_start_frame(ep, self.spec)
+            for j in range(self.group_size):
+                frames[base + j] = frame
+        return frames
+
+    def _make_subenv(
+        self, episode_id: int, start_frame: Optional[int] = None
+    ) -> _SubEnv:
         if self._demo_timestep_sampler.enabled:
             return self._make_demo_timestep_subenv(episode_id)
         ep, model = self._get_episode(episode_id)
-        # DeepMimic RSI: start from a randomly sampled reference frame
-        start_frame = self.rsi.sample_start_frame(ep, self.spec)
+        # DeepMimic RSI: start from a sampled reference frame. ``start_frame`` may be
+        # supplied by the caller (group-shared RSI, see ``reset``); otherwise each
+        # sub-env samples its own.
+        if start_frame is None:
+            start_frame = self.rsi.sample_start_frame(ep, self.spec)
         data = mujoco.MjData(model)
         data.qpos[:] = ep.qpos_demo[start_frame]
         data.qvel[:] = ep.qvel_demo[start_frame]
@@ -382,8 +412,11 @@ class TacoEnv(gym.Env):
     ):
         if not self.use_fixed_reset_state_ids:
             self.update_reset_state_ids()
+        start_frames = self._sample_group_start_frames()
         for i in range(self.num_envs):
-            self.subenvs[i] = self._make_subenv(int(self.reset_state_ids[i]))
+            self.subenvs[i] = self._make_subenv(
+                int(self.reset_state_ids[i]), start_frame=start_frames[i]
+            )
         if self._replay_records is not None:
             self._snapshot_replay_records()
         infos: dict[str, Any] = {}

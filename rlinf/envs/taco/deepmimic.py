@@ -96,6 +96,13 @@ class RSISampler:
     def __init__(self, cfg: dict[str, Any] | None, seed: int):
         cfg = dict(cfg) if cfg else {}
         self.enabled = bool(cfg.get("enabled", False))
+        # When True, every env in a GRPO group shares ONE sampled start frame (the
+        # env also already shares the group's episode), so a group is a set of
+        # stochastic rollouts from one identical initial state. This makes the GRPO
+        # group-mean a per-state baseline V(s_start) and cancels the RSI start-frame
+        # difficulty bias in the advantage. When False (default) every env samples
+        # its own start frame independently (legacy behavior).
+        self.group_shared = bool(cfg.get("group_shared", False))
         # never start so late that fewer than this many control steps remain
         self.min_remaining_steps = int(cfg.get("min_remaining_steps", 8))
         # object "starts moving" (= contact) when displaced more than this (m)

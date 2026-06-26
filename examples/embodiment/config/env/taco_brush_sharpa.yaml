@@ -77,6 +77,9 @@ reward:
 # -------------------------------------- DeepMimic training aids (default off)
 rsi: # Reference State Initialization: start episodes at random demo frames
   enabled: False
+  group_shared: False # share ONE start frame across each GRPO group (group_size>1 +
+                      # adv_type=grpo) so the group-mean is a per-state baseline V(s)
+                      # that cancels the RSI start-frame difficulty bias; both backends
   min_remaining_steps: 8 # never start within this many steps of the demo end
   contact_pos_threshold_m: 1.0e-3 # object "starts moving" when displaced > this (m) from demo frame 0
   contact_object: earliest # earliest | tool | target -- which object's first motion bounds sampling
