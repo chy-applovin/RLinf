@@ -822,8 +822,8 @@ def validate_embodied_cfg(cfg):
             "algorithm.normalize_advantages must be False when "
             "runner.use_training_pipeline is True."
         )
-        assert cfg.algorithm.adv_type == "gae", (
-            "algorithm.adv_type only supports 'gae' now"
+        assert cfg.algorithm.adv_type in ("gae", "grpo_step"), (
+            "algorithm.adv_type only supports 'gae' or 'grpo_step' "
             "when runner.use_training_pipeline is True."
         )
 
@@ -1202,6 +1202,24 @@ def validate_coding_online_rl_cfg(cfg: DictConfig) -> DictConfig:
     return cfg
 
 
+def _assert_grpo_step_cfg(cfg):
+    if cfg.algorithm.adv_type != "grpo_step":
+        return
+    assert cfg.algorithm.group_size > 1, (
+        "algorithm.adv_type='grpo_step' needs algorithm.group_size > 1: "
+        "the per-timestep baseline is the group-mean, which is degenerate "
+        "(advantage == 0) when each group has a single env. To use the whole "
+        "batch as one group, set group_size == total_num_envs."
+    )
+    rsi = cfg.env.train.get("rsi", {})
+    assert rsi.get("enabled", False) and rsi.get("group_shared", False), (
+        "algorithm.adv_type='grpo_step' requires group-shared RSI "
+        "(env.train.rsi.enabled=True and env.train.rsi.group_shared=True): the "
+        "per-timestep group-mean is only a valid per-state baseline when every "
+        "env in a group shares one start state."
+    )
+
+
 def validate_cfg(cfg: DictConfig) -> DictConfig:
     OmegaConf.set_struct(cfg, True)
 
@@ -1247,8 +1265,14 @@ def validate_cfg(cfg: DictConfig) -> DictConfig:
         cfg = validate_offline_cfg(cfg)
 
     if cfg.runner.task_type != "sft" and not cfg.runner.get("only_eval", False):
-        if cfg.algorithm.adv_type in ("grpo", "grpo_dynamic", "reinpp_baseline"):
+        if cfg.algorithm.adv_type in (
+            "grpo",
+            "grpo_dynamic",
+            "reinpp_baseline",
+            "grpo_step",
+        ):
             assert cfg.algorithm.group_size > 1
+        _assert_grpo_step_cfg(cfg)
 
     assert cfg.actor.training_backend in SUPPORTED_TRAINING_BACKENDS, (
         f"Unsupported training_backend {cfg.actor.training_backend}. Supported training backends are {SUPPORTED_TRAINING_BACKENDS}."
