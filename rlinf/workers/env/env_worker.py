@@ -14,7 +14,9 @@
 
 import asyncio
 import gc
+import os
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Literal
 
 import numpy as np
@@ -34,6 +36,7 @@ from rlinf.envs import get_env_cls
 from rlinf.envs.action_utils import prepare_actions
 from rlinf.envs.wrappers import RecordVideo
 from rlinf.scheduler import Channel, Cluster, Worker
+from rlinf.utils.best_video import build_best_artifact_path, pick_local_best
 from rlinf.utils.comm_mapping import CommMapper
 from rlinf.utils.metric_utils import compute_split_num
 from rlinf.utils.nested_dict_process import (
@@ -59,6 +62,17 @@ class EnvWorker(Worker):
         self.cfg = cfg
         self.train_video_cnt = 0
         self.eval_video_cnt = 0
+        train_video_cfg = (
+            self.cfg.env.train.get("video_cfg", {})
+            if self.cfg.env.get("train", None) is not None
+            else {}
+        )
+        self.save_best_reward_video = bool(
+            train_video_cfg.get("save_best_reward_video", False)
+        )
+        self._best_local: tuple[int, int, float] | None = None
+        self._best_video_executor: ThreadPoolExecutor | None = None
+        self._saved_env_cfg: bool = False
         self.should_stop = False
 
         self.env_list = []
@@ -250,6 +264,17 @@ class EnvWorker(Worker):
                 assert all(hasattr(env, "offload") for env in self.env_list), (
                     "train envs must have an offload method to enable offload!"
                 )
+            if self.save_best_reward_video:
+                if all(hasattr(env, "replay_record") for env in self.env_list):
+                    for env in self.env_list:
+                        env.enable_replay_recording(True)
+                    self._best_video_executor = ThreadPoolExecutor(max_workers=1)
+                else:
+                    self.log_warning(
+                        "save_best_reward_video=True but the env does not support "
+                        "replay recording; disabling best-reward video."
+                    )
+                    self.save_best_reward_video = False
 
         if self.enable_eval:
             eval_env_cls = get_env_cls(self.cfg.env.eval.env_type, self.cfg.env.eval)
@@ -835,6 +860,120 @@ class EnvWorker(Worker):
                     self.eval_env_list[i].flush_video()
                 if not self.cfg.env.eval.auto_reset:
                     self.eval_env_list[i].update_reset_state_ids()
+
+    def get_best_episode_return(self) -> float:
+        """Compute and return this worker's local-best episode return (-inf if none).
+
+        Computed lazily from the live env state so the result does not depend on
+        when ``interact``'s coroutine tail runs on the async event loop. The runner
+        only calls this after the rollout has been consumed, so per-env returns are
+        final and stable.
+        """
+        if not self.save_best_reward_video:
+            return float("-inf")
+        returns_per_stage = [
+            self.env_list[stage_id].last_episode_returns().tolist()
+            for stage_id in range(self.stage_num)
+        ]
+        self._best_local = pick_local_best(returns_per_stage)
+        if self._best_local is None:
+            return float("-inf")
+        return float(self._best_local[2])
+
+    def save_best_episode_video(self, winner_rank: int, step: int) -> None:
+        """Dump the best episode's replay data on the winning rank only.
+
+        Writes a tiny per-step ``.npz`` (qpos trajectory + episode name) for
+        OFFLINE rendering, plus the resolved env config once so the offline
+        renderer can rebuild the model from the dataset. No rendering happens
+        during training. Best-effort: failures are logged and swallowed so they
+        never abort training.
+
+        Args:
+            winner_rank: The worker rank that holds the global-best episode.
+            step: The current training step, used for naming the output file.
+        """
+        if not self.save_best_reward_video:
+            return
+        if self._rank == winner_rank and self._best_local is not None:
+            stage_id, env_idx, ret = self._best_local
+            try:
+                record = self.env_list[stage_id].replay_record(env_idx)
+                if record is not None:
+                    self._submit_best_replay(record, step, ret)
+            except Exception as exc:
+                self.log_warning(
+                    f"best-reward replay dump failed at step {step}; skipping it, "
+                    f"training continues. Cause: {type(exc).__name__}: {exc}"
+                )
+        self._best_local = None
+
+    def close(self) -> None:
+        """Flush pending best-replay disk writes (idempotent)."""
+        if self._best_video_executor is not None:
+            self._best_video_executor.shutdown(wait=True)
+            self._best_video_executor = None
+
+    def _best_video_dir(self) -> str:
+        video_cfg = self.cfg.env.train.video_cfg
+        base = video_cfg.get("best_reward_video_dir", None)
+        if not base:
+            base = os.path.join(video_cfg.video_base_dir, "best")
+        return base
+
+    def _save_env_cfg_once(self, out_dir: str) -> None:
+        """Write the resolved env.train config once, for offline model rebuild."""
+        if self._saved_env_cfg:
+            return
+        cfg_path = os.path.join(out_dir, "env_train_cfg.yaml")
+        try:
+            text = OmegaConf.to_yaml(self.cfg.env.train, resolve=True)
+        except Exception:
+            # Fall back to unresolved (offline must then set the same env vars,
+            # e.g. EMBODIED_PATH, that the interpolations reference).
+            text = OmegaConf.to_yaml(self.cfg.env.train, resolve=False)
+        with open(cfg_path, "w") as f:
+            f.write(text)
+        self._saved_env_cfg = True
+
+    def _submit_best_replay(self, record: dict, step: int, ret: float) -> None:
+        out_dir = self._best_video_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        self._save_env_cfg_once(out_dir)
+
+        data_path = build_best_artifact_path(out_dir, step, ret, suffix=".npz")
+        if self._best_video_executor is None:
+            self._best_video_executor = ThreadPoolExecutor(max_workers=1)
+        self._best_video_executor.submit(
+            self._write_replay_npz,
+            data_path,
+            record["qpos"],
+            str(record["episode"]),
+            int(record["render_height"]),
+            int(record["render_width"]),
+            int(step),
+            float(ret),
+        )
+
+    @staticmethod
+    def _write_replay_npz(
+        path: str,
+        qpos: np.ndarray,
+        episode: str,
+        render_height: int,
+        render_width: int,
+        step: int,
+        ret: float,
+    ) -> None:
+        np.savez_compressed(
+            path,
+            qpos=qpos,
+            episode=episode,
+            render_height=render_height,
+            render_width=render_width,
+            step=step,
+            ret=ret,
+        )
 
     @Worker.timer("env/send_obs")
     def send_env_batch(

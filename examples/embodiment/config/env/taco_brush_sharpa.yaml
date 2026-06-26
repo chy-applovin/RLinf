@@ -116,6 +116,10 @@ video_cfg:
   save_video: False
   info_on_video: False
   video_base_dir: ${runner.logger.log_path}/video/train
+  fps: 30
+  save_best_reward_video: False
+  best_reward_video_dir: null      # default: <video_base_dir>/best
+  best_reward_video_interval: 1    # save every N training steps (distinct files, no overwrite)
 video_num_envs: 4
 render_height: 240
 render_width: 320

@@ -24,6 +24,7 @@ from omegaconf.dictconfig import DictConfig
 
 from rlinf.scheduler import Channel
 from rlinf.scheduler import WorkerGroupFuncResult as Handle
+from rlinf.utils.best_video import select_global_best_rank
 from rlinf.utils.distributed import ScopedTimer
 from rlinf.utils.logging import get_logger
 from rlinf.utils.metric_logger import MetricLogger
@@ -70,6 +71,18 @@ class EmbodiedRunner:
         self.env = env
         self.critic = critic
         self.reward = reward
+        train_cfg = self.cfg.env.get("train", None)
+        train_video_cfg = (
+            train_cfg.get("video_cfg", {}) if train_cfg is not None else {}
+        )
+        self.save_best_reward_video = bool(
+            train_video_cfg.get("save_best_reward_video", False)
+        )
+        # Save the best trajectory every N training steps (1 = every step). Each
+        # save writes a distinct step_<N>_ret_<R>.npz, so saves never overwrite.
+        self.best_reward_video_interval = max(
+            1, int(train_video_cfg.get("best_reward_video_interval", 1))
+        )
         self.weight_sync_interval = self.cfg.runner.weight_sync_interval
         self.overlap_env_bootstrap = bool(
             self.cfg.runner.get("overlap_env_bootstrap", False)
@@ -327,6 +340,23 @@ class EmbodiedRunner:
 
         return eval_metrics
 
+    def _maybe_save_best_video(self, step: int) -> None:
+        """Pick the global best-reward trajectory and ask its rank to save it.
+
+        Args:
+            step: The current global training step, forwarded to the env worker
+                so the saved file can be named by step number.
+        """
+        if not self.save_best_reward_video:
+            return
+        if step % self.best_reward_video_interval != 0:
+            return
+        returns = self.env.get_best_episode_return().wait()
+        winner = select_global_best_rank(returns)
+        if winner is None:
+            return
+        self.env.save_best_episode_video(winner, step).wait()
+
     def _log_step_metrics(
         self,
         step: int,
@@ -542,6 +572,7 @@ class EmbodiedRunner:
 
                 self.global_step += 1
                 eval_metrics = self._maybe_eval_and_checkpoint(_step)
+                self._maybe_save_best_video(_step)
 
             if profiled_step is not None:
                 self._close_profiling_window(profiled_step)
@@ -622,6 +653,7 @@ class EmbodiedRunner:
 
                 self.global_step += 1
                 eval_metrics = self._maybe_eval_and_checkpoint(_step)
+                self._maybe_save_best_video(_step)
 
             if profiled_step is not None:
                 self._close_profiling_window(profiled_step)

@@ -141,6 +141,16 @@ video_cfg:
   save_video: False
   info_on_video: False
   video_base_dir: ${runner.logger.log_path}/video/train
+  fps: 30
+  # Record the single global best-reward trajectory per training step (opt-in;
+  # independent of save_video). GL-free: training dumps a tiny qpos-trajectory
+  # .npz (+ the env config once) under <best_reward_video_dir>; rebuild the model
+  # from the dataset and render to mp4 offline with
+  # `python yjw_scripts/render_best_videos.py <best_dir>`.
+  # CPU TacoEnv only (the GPU mjwarp backend self-disables it).
+  save_best_reward_video: False
+  best_reward_video_dir: null      # default: <video_base_dir>/best
+  best_reward_video_interval: 1    # save every N training steps (distinct files, no overwrite)
 video_num_envs: 4
 render_height: 240
 render_width: 320
