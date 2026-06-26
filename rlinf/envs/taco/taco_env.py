@@ -255,6 +255,14 @@ class TacoEnv(gym.Env):
         self.subenvs: list[_SubEnv] = [None] * self.num_envs
         self._is_start = True
 
+        # --------------------------------------------- best-reward video replay
+        # When enabled, reset() snapshots each sub-env's initial (qpos, qvel) and
+        # step() records executed actions, so the best episode can be replayed
+        # deterministically and rendered after the rollout. ``None`` means
+        # recording is disabled; a list (empty until the first reset) means it is
+        # enabled.
+        self._replay_records: Optional[list[Optional[dict]]] = None
+
     # ------------------------------------------------------------------ props
     @property
     def is_start(self) -> bool:
@@ -376,6 +384,8 @@ class TacoEnv(gym.Env):
             self.update_reset_state_ids()
         for i in range(self.num_envs):
             self.subenvs[i] = self._make_subenv(int(self.reset_state_ids[i]))
+        if self._replay_records is not None:
+            self._snapshot_replay_records()
         infos: dict[str, Any] = {}
         return self._wrap_obs(), infos
 
@@ -452,11 +462,25 @@ class TacoEnv(gym.Env):
             f"got {actions.shape}"
         )
 
+        # Per-env "done before this step": only envs that actually execute this
+        # step get a new recorded frame, so trajectory length == executed steps.
+        record_prev_done = (
+            [s is None or s.done for s in self.subenvs]
+            if self._replay_records
+            else None
+        )
+
         results = list(
             self._pool.map(
                 self._step_one, range(self.num_envs), [actions[i] for i in range(self.num_envs)]
             )
         )
+
+        if record_prev_done is not None:
+            for i in range(self.num_envs):
+                rec = self._replay_records[i]
+                if rec is not None and not record_prev_done[i]:
+                    rec["qpos"].append(self.subenvs[i].data.qpos.copy())
         rewards = torch.tensor([r for r, _ in results], dtype=torch.float32)
 
         terminations = torch.tensor(
@@ -592,6 +616,63 @@ class TacoEnv(gym.Env):
             sub.renderer.update_scene(sub.data, camera=cam)
             frames.append(sub.renderer.render())
         return np.concatenate(frames, axis=1)
+
+    # ----------------------------------------------- best-reward video replay
+    def enable_replay_recording(self, flag: bool = True) -> None:
+        """Toggle per-env qpos-trajectory recording for offline replay.
+
+        Sets the buffer to an empty list when enabling (the first ``reset()``
+        fills it) and to ``None`` when disabling. While enabled, ``reset()``
+        seeds each env's trajectory with its initial qpos and ``step()`` appends
+        the qpos after every executed control step. No rendering happens here;
+        the recorded states are dumped to disk and rendered offline.
+        """
+        self._replay_records = [] if flag else None
+
+    def _snapshot_replay_records(self) -> None:
+        """Seed each sub-env's replay record at reset (model + initial qpos)."""
+        records: list[Optional[dict]] = []
+        for i in range(self.num_envs):
+            sub = self.subenvs[i]
+            if sub is None:
+                records.append(None)
+                continue
+            episode_dir = self.episode_dirs[int(self.reset_state_ids[i])]
+            records.append(
+                {
+                    "episode": episode_dir.name,
+                    "qpos": [sub.data.qpos.copy()],
+                }
+            )
+        self._replay_records = records
+
+    def last_episode_returns(self) -> torch.Tensor:
+        """Per-env cumulative return after the rollout (-inf for missing)."""
+        return torch.tensor(
+            [
+                float(sub.ret) if sub is not None else float("-inf")
+                for sub in self.subenvs
+            ],
+            dtype=torch.float32,
+        )
+
+    def replay_record(self, env_idx: int) -> Optional[dict]:
+        """Return one env's recorded trajectory for offline rendering.
+
+        Contains the qpos trajectory (initial state + one frame per executed
+        control step), the episode name (so the offline renderer can rebuild
+        the model from the dataset), and the render size. No model and no
+        rendering happen here; dump these to disk and render offline.
+        """
+        rec = self._replay_records[env_idx] if self._replay_records else None
+        if rec is None or not rec["qpos"]:
+            return None
+        return {
+            "qpos": np.stack(rec["qpos"]).astype(np.float32),  # [T+1, nq]
+            "episode": rec["episode"],
+            "render_height": int(self._render_size[0]),
+            "render_width": int(self._render_size[1]),
+        }
 
     def close(self):
         for sub in self.subenvs:
