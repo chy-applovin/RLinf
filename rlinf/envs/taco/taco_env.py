@@ -48,7 +48,7 @@ from omegaconf import OmegaConf
 
 from rlinf.envs.taco.deepmimic import EarlyTermination, RSISampler
 from rlinf.envs.taco.rewards import BaseTacoReward, build_reward
-from rlinf.envs.taco.robots import get_robot_spec
+from rlinf.envs.taco.robots import _flatten, get_robot_spec
 from rlinf.envs.taco.scene import (
     EpisodeData,
     load_episode_data,
@@ -79,7 +79,9 @@ class _SubEnv:
     terminated: bool = False  # DeepMimic ET: failure termination (vs truncation)
     final_tool_err: float = float("nan")
     final_target_err: float = float("nan")
-    final_hand_err: float = float("nan")
+    final_wrist_pos_err: float = float("nan")
+    final_wrist_orient_err: float = float("nan")
+    final_joint_err: float = float("nan")
     renderer: Optional[mujoco.Renderer] = None
 
     def demo_qpos(self, executed_steps: int) -> np.ndarray:
@@ -461,11 +463,7 @@ class TacoEnv(gym.Env):
     def _record_final_errors(self, sub: _SubEnv) -> None:
         sim = sub.data.qpos
         demo = sub.demo_qpos(sub.steps)
-        tool, target, hand_dim = (
-            self.spec.tool_obj_qpos,
-            self.spec.target_obj_qpos,
-            self.spec.hand_dim,
-        )
+        tool, target = self.spec.tool_obj_qpos, self.spec.target_obj_qpos
         sub.final_tool_err = float(
             np.linalg.norm(
                 sim[tool.start : tool.start + 3] - demo[tool.start : tool.start + 3]
@@ -477,7 +475,12 @@ class TacoEnv(gym.Env):
                 - demo[target.start : target.start + 3]
             )
         )
-        sub.final_hand_err = float(np.abs(sim[:hand_dim] - demo[:hand_dim]).mean())
+        wp_idx = list(_flatten(self.spec.wrist_pos_qpos))
+        wo_idx = list(_flatten(self.spec.wrist_orient_qpos))
+        j_idx = list(_flatten(self.spec.joint_qpos))
+        sub.final_wrist_pos_err = float(np.linalg.norm(sim[wp_idx] - demo[wp_idx]))
+        sub.final_wrist_orient_err = float(np.linalg.norm(sim[wo_idx] - demo[wo_idx]))
+        sub.final_joint_err = float(np.linalg.norm(sim[j_idx] - demo[j_idx]))
 
     def step(self, actions, build_obs: bool = True):
         """Execute one hand_dim qpos-target action per sub-env.
@@ -598,8 +601,14 @@ class TacoEnv(gym.Env):
         target_err = torch.tensor(
             [sub.final_target_err for sub in self.subenvs], dtype=torch.float32
         )
-        hand_err = torch.tensor(
-            [sub.final_hand_err for sub in self.subenvs], dtype=torch.float32
+        wrist_pos_err = torch.tensor(
+            [sub.final_wrist_pos_err for sub in self.subenvs], dtype=torch.float32
+        )
+        wrist_orient_err = torch.tensor(
+            [sub.final_wrist_orient_err for sub in self.subenvs], dtype=torch.float32
+        )
+        joint_err = torch.tensor(
+            [sub.final_joint_err for sub in self.subenvs], dtype=torch.float32
         )
         success = (tool_err < self.success_threshold_m) & torch.tensor(
             [sub.done and not sub.terminated for sub in self.subenvs]
@@ -611,7 +620,9 @@ class TacoEnv(gym.Env):
             "success_once": success,
             "tool_pos_err_final_m": tool_err,
             "target_pos_err_final_m": target_err,
-            "hand_qpos_err_final": hand_err,
+            "wrist_pos_err_final": wrist_pos_err,
+            "wrist_orient_err_final": wrist_orient_err,
+            "joint_err_final": joint_err,
         }
         if self.et_enabled:
             metrics["terminated_early"] = torch.tensor(

@@ -64,12 +64,16 @@ num_threads: 0            # physics thread pool; 0 -> min(num_envs, 16)
 # Pluggable (rlinf/envs/taco/rewards.py): tracking | zero | vlm_judge (TBD).
 reward:
   type: tracking
-  tool_pos_weight: 2.0
-  target_pos_weight: 2.0
-  hand_qpos_weight: 0.1
-  tool_pos_scale: 0.05    # meters
-  target_pos_scale: 0.05  # meters
-  hand_qpos_scale: 0.5    # radians
+  tool_pos_weight: 1.0
+  target_pos_weight: 1.0
+  wrist_pos_weight: 0.1
+  wrist_orient_weight: 0.03
+  joint_weight: 0.003
+  tool_pos_scale: 0.05      # meters
+  target_pos_scale: 0.05    # meters
+  wrist_pos_scale: 0.05     # meters
+  wrist_orient_scale: 0.1   # radians
+  joint_scale: 0.1          # radians
   # Contact-consistency term (anti reward-hacking; CPU backend only).
   contact_weight: 0.0
   contact_dist_tol: 1.0e-3 # a contact counts as touching when dist < tol (m)
