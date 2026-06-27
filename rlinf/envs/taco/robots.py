@@ -24,7 +24,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-__all__ = ["RobotSpec", "ROBOT_SPECS", "get_robot_spec"]
+__all__ = ["RobotSpec", "ROBOT_SPECS", "get_robot_spec", "_flatten"]
+
+
+def _flatten(slices: tuple[slice, ...]) -> tuple[int, ...]:
+    """Expand a tuple of slices into a flat tuple of integer qpos indices."""
+    out: list[int] = []
+    for s in slices:
+        out.extend(range(s.start, s.stop))
+    return tuple(out)
 
 
 @dataclass(frozen=True)
@@ -37,6 +45,12 @@ class RobotSpec:
         tool_obj_qpos: free-joint qpos slice of the right object (tool):
             pos(3) + quat wxyz(4).
         target_obj_qpos: free-joint qpos slice of the left object (target).
+        wrist_pos_qpos: hand dof group for wrist position (x, y, z); tuple of
+            slices (one per hand). Together with wrist_orient_qpos and joint_qpos,
+            partitions [0:hand_dim) with no overlap.
+        wrist_orient_qpos: hand dof group for wrist orientation (rx, ry, rz);
+            tuple of slices (one per hand).
+        joint_qpos: hand dof group for finger joints; tuple of slices (one per hand).
         mesh_alias: scene-expected mesh filename -> source filename in
             ``robot_assets_root``. Empty for robots whose scene mesh names match
             the on-disk files; non-empty when the dataset scenes reference a
@@ -47,12 +61,23 @@ class RobotSpec:
     hand_dim: int
     tool_obj_qpos: slice
     target_obj_qpos: slice
+    wrist_pos_qpos: tuple[slice, ...]
+    wrist_orient_qpos: tuple[slice, ...]
+    joint_qpos: tuple[slice, ...]
     mesh_alias: dict[str, str] = field(default_factory=dict)
 
 
 ROBOT_SPECS: dict[str, RobotSpec] = {
     # 44 hand dofs + 2 free-joint objects (nq=58).
-    "allegro": RobotSpec("allegro", 44, slice(44, 51), slice(51, 58)),
+    "allegro": RobotSpec(
+        "allegro",
+        44,
+        slice(44, 51),
+        slice(51, 58),
+        (slice(0, 3), slice(22, 25)),    # wrist_pos
+        (slice(3, 6), slice(25, 28)),    # wrist_orient
+        (slice(6, 22), slice(28, 44)),   # joint
+    ),
     # 56 hand dofs + 2 free-joint objects (nq=70). The dataset scenes reference
     # 6 fingertip meshes by a baked shared-geometry naming (DP_HB1_*/elastomer_
     # HB1_*) that the on-disk Spider mesh set stores under per-finger names;
@@ -63,6 +88,9 @@ ROBOT_SPECS: dict[str, RobotSpec] = {
         56,
         slice(56, 63),
         slice(63, 70),
+        (slice(0, 3), slice(28, 31)),    # wrist_pos
+        (slice(3, 6), slice(31, 34)),    # wrist_orient
+        (slice(6, 28), slice(34, 56)),   # joint
         {
             "DP_HB1_4F.STL": "right_DP.STL",
             "DP_visual_HB1_4F.STL": "right_DP_visual.STL",

@@ -42,8 +42,8 @@ import torch
 from omegaconf import OmegaConf
 
 from rlinf.envs.taco.deepmimic import RSISampler
-from rlinf.envs.taco.rewards import _object_motion_onset
-from rlinf.envs.taco.robots import get_robot_spec
+from rlinf.envs.taco.rewards import _object_motion_onset, _reject_legacy_hand_keys
+from rlinf.envs.taco.robots import _flatten, get_robot_spec
 from rlinf.envs.taco.scene import (
     load_episode_data,
     select_episodes,
@@ -161,14 +161,25 @@ class TacoEnvGPU(gym.Env):
             "the contact-consistency reward term is not implemented in the GPU "
             "backend (use sim_backend: cpu)"
         )
+        _reject_legacy_hand_keys(reward_cfg)
         self.w_tool = float(reward_cfg.get("tool_pos_weight", 1.0))
         self.w_target = float(reward_cfg.get("target_pos_weight", 1.0))
-        self.w_hand = float(reward_cfg.get("hand_qpos_weight", 0.1))
+        self.w_wrist_pos = float(reward_cfg.get("wrist_pos_weight", 0.1))
+        self.w_wrist_orient = float(reward_cfg.get("wrist_orient_weight", 0.1))
+        self.w_joint = float(reward_cfg.get("joint_weight", 0.01))
         self.s_tool = float(reward_cfg.get("tool_pos_scale", 0.05))
         self.s_target = float(reward_cfg.get("target_pos_scale", 0.05))
-        self.s_hand = float(reward_cfg.get("hand_qpos_scale", 0.5))
+        self.s_wrist_pos = float(reward_cfg.get("wrist_pos_scale", 0.05))
+        self.s_wrist_orient = float(reward_cfg.get("wrist_orient_scale", 0.1))
+        self.s_joint = float(reward_cfg.get("joint_scale", 0.1))
         self.reward_norm = (
-            (self.w_tool + self.w_target + self.w_hand)
+            (
+                self.w_tool
+                + self.w_target
+                + self.w_wrist_pos
+                + self.w_wrist_orient
+                + self.w_joint
+            )
             if bool(reward_cfg.get("normalize_by_weights", True))
             else 1.0
         )
@@ -213,6 +224,16 @@ class TacoEnvGPU(gym.Env):
         f32 = dict(dtype=torch.float32, device=self.device)
         self.demo_qpos = torch.as_tensor(self.episode.qpos_demo, **f32)  # (T, nq)
         self.demo_qvel = torch.as_tensor(self.episode.qvel_demo, **f32)  # (T, nv)
+        # flat hand dof-group indices for the split tracking reward (on device)
+        self._wrist_pos_idx = torch.as_tensor(
+            _flatten(self.spec.wrist_pos_qpos), dtype=torch.long, device=self.device
+        )
+        self._wrist_orient_idx = torch.as_tensor(
+            _flatten(self.spec.wrist_orient_qpos), dtype=torch.long, device=self.device
+        )
+        self._joint_idx = torch.as_tensor(
+            _flatten(self.spec.joint_qpos), dtype=torch.long, device=self.device
+        )
         self.target_local = torch.as_tensor(self.episode.target_local, **f32)
         self.tool_local = (
             torch.as_tensor(self.episode.tool_local, **f32)
@@ -235,7 +256,9 @@ class TacoEnvGPU(gym.Env):
         self._returns = torch.zeros(b, **f32)
         self._final_tool_err = torch.full((b,), float("nan"), **f32)
         self._final_target_err = torch.full((b,), float("nan"), **f32)
-        self._final_hand_err = torch.full((b,), float("nan"), **f32)
+        self._final_wrist_pos_err = torch.full((b,), float("nan"), **f32)
+        self._final_wrist_orient_err = torch.full((b,), float("nan"), **f32)
+        self._final_joint_err = torch.full((b,), float("nan"), **f32)
         self._is_start = True
 
     # --------------------------------------------------------------- warp env
@@ -352,13 +375,11 @@ class TacoEnvGPU(gym.Env):
         return obs
 
     # ------------------------------------------------------------------ errors
-    def _errors(self, qpos: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Frame-aligned (tool_err, target_err, hand_err), each (B,)."""
-        tool_q, target_q, hand_dim = (
-            self.spec.tool_obj_qpos,
-            self.spec.target_obj_qpos,
-            self.spec.hand_dim,
-        )
+    def _errors(
+        self, qpos: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Frame-aligned (tool, target, wrist_pos, wrist_orient, joint) errs, each (B,)."""
+        tool_q, target_q = self.spec.tool_obj_qpos, self.spec.target_obj_qpos
         T = self.episode.num_frames
         idx = torch.clamp(self._start_frames + self.steps, max=T - 1)   # (B,)
         demo = self.demo_qpos[idx]                                      # (B, nq)
@@ -372,13 +393,23 @@ class TacoEnvGPU(gym.Env):
             - demo[:, target_q.start : target_q.start + 3],
             dim=1,
         )
-        hand_err = (qpos[:, :hand_dim] - demo[:, :hand_dim]).abs().mean(dim=1)
-        return tool_err, target_err, hand_err
+        wrist_pos_err = torch.linalg.norm(
+            qpos[:, self._wrist_pos_idx] - demo[:, self._wrist_pos_idx], dim=1
+        )
+        wrist_orient_err = torch.linalg.norm(
+            qpos[:, self._wrist_orient_idx] - demo[:, self._wrist_orient_idx], dim=1
+        )
+        joint_err = torch.linalg.norm(
+            qpos[:, self._joint_idx] - demo[:, self._joint_idx], dim=1
+        )
+        return tool_err, target_err, wrist_pos_err, wrist_orient_err, joint_err
 
     def _compute_rewards(self, qpos: torch.Tensor) -> torch.Tensor:
         if self.reward_type == "zero":
             return torch.zeros(self.num_envs, device=self.device)
-        tool_err, target_err, hand_err = self._errors(qpos)
+        tool_err, target_err, wrist_pos_err, wrist_orient_err, joint_err = self._errors(
+            qpos
+        )
         tool_gate = target_gate = 1.0
         if self.obj_motion_gate:
             # Per-world demo frame (matches _errors): RSI start frames differ, so
@@ -390,7 +421,9 @@ class TacoEnvGPU(gym.Env):
         reward = (
             tool_gate * self.w_tool * torch.exp(-tool_err / self.s_tool)
             + target_gate * self.w_target * torch.exp(-target_err / self.s_target)
-            + self.w_hand * torch.exp(-hand_err / self.s_hand)
+            + self.w_wrist_pos * torch.exp(-wrist_pos_err / self.s_wrist_pos)
+            + self.w_wrist_orient * torch.exp(-wrist_orient_err / self.s_wrist_orient)
+            + self.w_joint * torch.exp(-joint_err / self.s_joint)
         ) / self.reward_norm
         return reward
 
@@ -438,7 +471,13 @@ class TacoEnvGPU(gym.Env):
         self._reset_warp_state(start_frames)
         self.steps = 0
         self._returns.zero_()
-        for buf in (self._final_tool_err, self._final_target_err, self._final_hand_err):
+        for buf in (
+            self._final_tool_err,
+            self._final_target_err,
+            self._final_wrist_pos_err,
+            self._final_wrist_orient_err,
+            self._final_joint_err,
+        ):
             buf.fill_(float("nan"))
         qpos = self._qpos()
         self._fill_obs_history(qpos)
@@ -473,10 +512,14 @@ class TacoEnvGPU(gym.Env):
 
         done_now = self.steps >= self.ep_len
         if done_now and torch.isnan(self._final_tool_err).any():
-            tool_err, target_err, hand_err = self._errors(qpos)
+            tool_err, target_err, wrist_pos_err, wrist_orient_err, joint_err = (
+                self._errors(qpos)
+            )
             self._final_tool_err.copy_(tool_err)
             self._final_target_err.copy_(target_err)
-            self._final_hand_err.copy_(hand_err)
+            self._final_wrist_pos_err.copy_(wrist_pos_err)
+            self._final_wrist_orient_err.copy_(wrist_orient_err)
+            self._final_joint_err.copy_(joint_err)
 
         truncations = torch.full((self.num_envs,), done_now, dtype=torch.bool)
         terminations = torch.zeros(self.num_envs, dtype=torch.bool)
@@ -523,7 +566,9 @@ class TacoEnvGPU(gym.Env):
         lens = torch.full((self.num_envs,), float(max(self.steps, 1)))
         tool_err = self._final_tool_err.float().cpu()
         target_err = self._final_target_err.float().cpu()
-        hand_err = self._final_hand_err.float().cpu()
+        wrist_pos_err = self._final_wrist_pos_err.float().cpu()
+        wrist_orient_err = self._final_wrist_orient_err.float().cpu()
+        joint_err = self._final_joint_err.float().cpu()
         done = self.steps >= self.ep_len
         success = (tool_err < self.success_threshold_m) & torch.full(
             (self.num_envs,), done
@@ -535,7 +580,9 @@ class TacoEnvGPU(gym.Env):
             "success_once": success,
             "tool_pos_err_final_m": tool_err,
             "target_pos_err_final_m": target_err,
-            "hand_qpos_err_final": hand_err,
+            "wrist_pos_err_final": wrist_pos_err,
+            "wrist_orient_err_final": wrist_orient_err,
+            "joint_err_final": joint_err,
         }
 
     def close(self):

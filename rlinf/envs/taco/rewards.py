@@ -36,6 +36,8 @@ from typing import TYPE_CHECKING, Any
 import mujoco
 import numpy as np
 
+from rlinf.envs.taco.robots import _flatten
+
 if TYPE_CHECKING:
     from rlinf.envs.taco.scene import EpisodeData
     from rlinf.envs.taco.taco_env import _SubEnv
@@ -60,6 +62,20 @@ def _object_motion_onset(
     disp = np.linalg.norm(pos - pos[0], axis=1)
     moved = np.flatnonzero(disp > threshold_m)
     return int(moved[0]) if moved.size else int(qpos_demo.shape[0])
+
+
+_LEGACY_HAND_KEYS = ("hand_qpos_weight", "hand_qpos_scale")
+
+
+def _reject_legacy_hand_keys(cfg: dict[str, Any]) -> None:
+    """Fail loud if a config still sets the removed combined-hand reward keys."""
+    present = [k for k in _LEGACY_HAND_KEYS if k in cfg]
+    if present:
+        raise ValueError(
+            f"{present} were removed from the TACO tracking reward; use "
+            "wrist_pos_weight, wrist_orient_weight, joint_weight (and their "
+            "*_scale counterparts) instead."
+        )
 
 
 class BaseTacoReward(ABC):
@@ -176,9 +192,11 @@ class _ContactRef:
 class TrackingReward(BaseTacoReward):
     """Dense demo-tracking reward (+ optional contact-consistency term).
 
-    r_t = [ g_tool   * w_tool    * exp(-|tool_pos   - demo_tool_pos|   / s_tool)
-          + g_target * w_target  * exp(-|target_pos - demo_target_pos| / s_target)
-          +            w_hand    * exp(-mean|hand_qpos - demo_hand_qpos| / s_hand)
+    r_t = [ g_tool   * w_tool         * exp(-|tool_pos   - demo_tool_pos|   / s_tool)
+          + g_target * w_target       * exp(-|target_pos - demo_target_pos| / s_target)
+          +            w_wrist_pos     * exp(-||wrist_pos    - demo_wrist_pos||    / s_wrist_pos)
+          +            w_wrist_orient  * exp(-||wrist_orient - demo_wrist_orient|| / s_wrist_orient)
+          +            w_joint         * exp(-||joint_qpos   - demo_joint_qpos||   / s_joint)
           +            w_contact * contact_match_t ] / W
 
     where W = sum of the active weights when ``normalize_by_weights`` (default),
@@ -196,8 +214,8 @@ class TrackingReward(BaseTacoReward):
     already "moving". This stops the policy from collecting near-max object
     reward for trivially tracking a stationary object during the approach phase.
     W is unchanged, so a gated-off object term contributes exactly 0 (a gated
-    step's reward is just the hand term, plus contact if enabled). An object
-    that never moves > threshold in the demo stays gated off all episode.
+    step's reward is just the wrist/joint terms, plus contact if enabled). An
+    object that never moves > threshold in the demo stays gated off all episode.
 
     **Contact-consistency term** (``contact_weight`` > 0, default 0 = off; cf.
     Spider's contact reward / DeepMimic-style reference matching): for each
@@ -214,17 +232,27 @@ class TrackingReward(BaseTacoReward):
 
     def __init__(self, cfg: dict[str, Any]):
         super().__init__(cfg)
+        _reject_legacy_hand_keys(cfg)
         self.w_tool = float(cfg.get("tool_pos_weight", 1.0))
         self.w_target = float(cfg.get("target_pos_weight", 1.0))
-        self.w_hand = float(cfg.get("hand_qpos_weight", 0.1))
+        self.w_wrist_pos = float(cfg.get("wrist_pos_weight", 0.1))
+        self.w_wrist_orient = float(cfg.get("wrist_orient_weight", 0.1))
+        self.w_joint = float(cfg.get("joint_weight", 0.01))
         self.w_contact = float(cfg.get("contact_weight", 0.0))
         self.s_tool = float(cfg.get("tool_pos_scale", 0.05))  # meters
         self.s_target = float(cfg.get("target_pos_scale", 0.05))  # meters
-        self.s_hand = float(cfg.get("hand_qpos_scale", 0.5))  # radians
+        self.s_wrist_pos = float(cfg.get("wrist_pos_scale", 0.05))  # meters
+        self.s_wrist_orient = float(cfg.get("wrist_orient_scale", 0.1))  # radians
+        self.s_joint = float(cfg.get("joint_scale", 0.1))  # radians
         # a MuJoCo contact counts as touching when its dist < this tol (m)
         self.contact_dist_tol = float(cfg.get("contact_dist_tol", 1.0e-3))
         self.norm = (
-            self.w_tool + self.w_target + self.w_hand + self.w_contact
+            self.w_tool
+            + self.w_target
+            + self.w_wrist_pos
+            + self.w_wrist_orient
+            + self.w_joint
+            + self.w_contact
             if bool(cfg.get("normalize_by_weights", True))
             else 1.0
         )
@@ -242,6 +270,8 @@ class TrackingReward(BaseTacoReward):
         # per-episode (tool_onset, target_onset) demo frames, built lazily
         self._motion_onsets: dict[str, tuple[int, int]] = {}
         self._motion_lock = threading.Lock()
+        # cached flat qpos indices per hand dof-group, keyed by robot name
+        self._group_idx_cache: dict[str, tuple] = {}
 
     def _get_motion_onsets(self, sub: "_SubEnv") -> tuple[int, int]:
         """Cached (tool_onset, target_onset) demo frames for this episode."""
@@ -264,6 +294,18 @@ class TrackingReward(BaseTacoReward):
                     self._motion_onsets[key] = onsets
         return onsets
 
+    def _group_idx(self, spec) -> tuple:
+        """Cached (wrist_pos, wrist_orient, joint) flat index arrays for spec."""
+        cached = self._group_idx_cache.get(spec.name)
+        if cached is None:
+            cached = (
+                np.asarray(_flatten(spec.wrist_pos_qpos), dtype=np.intp),
+                np.asarray(_flatten(spec.wrist_orient_qpos), dtype=np.intp),
+                np.asarray(_flatten(spec.joint_qpos), dtype=np.intp),
+            )
+            self._group_idx_cache[spec.name] = cached
+        return cached
+
     def _get_contact_ref(self, sub: "_SubEnv") -> _ContactRef:
         key = sub.episode.name
         ref = self._contact_refs.get(key)
@@ -277,11 +319,7 @@ class TrackingReward(BaseTacoReward):
 
     def compute(self, sub: "_SubEnv") -> tuple[float, dict[str, float]]:
         spec = sub.episode.spec
-        tool_q, target_q, hand_dim = (
-            spec.tool_obj_qpos,
-            spec.target_obj_qpos,
-            spec.hand_dim,
-        )
+        tool_q, target_q = spec.tool_obj_qpos, spec.target_obj_qpos
 
         sim = sub.data.qpos
         demo = sub.demo_qpos(sub.steps)
@@ -298,10 +336,13 @@ class TrackingReward(BaseTacoReward):
                 - demo[target_q.start : target_q.start + 3]
             )
         )
-        hand_err = float(np.abs(sim[:hand_dim] - demo[:hand_dim]).mean())
+        wp_idx, wo_idx, j_idx = self._group_idx(spec)
+        wrist_pos_err = float(np.linalg.norm(sim[wp_idx] - demo[wp_idx]))
+        wrist_orient_err = float(np.linalg.norm(sim[wo_idx] - demo[wo_idx]))
+        joint_err = float(np.linalg.norm(sim[j_idx] - demo[j_idx]))
 
         # Motion gate: 0 until the object's demo onset frame is reached, 1 after
-        # (latched -- the demo frame only advances). Hand term is never gated.
+        # (latched -- the demo frame only advances). Hand terms are never gated.
         tool_gate = target_gate = 1.0
         if self.obj_motion_gate:
             tool_onset, target_onset = self._get_motion_onsets(sub)
@@ -312,12 +353,16 @@ class TrackingReward(BaseTacoReward):
         weighted_sum = (
             tool_gate * self.w_tool * np.exp(-tool_err / self.s_tool)
             + target_gate * self.w_target * np.exp(-target_err / self.s_target)
-            + self.w_hand * np.exp(-hand_err / self.s_hand)
+            + self.w_wrist_pos * np.exp(-wrist_pos_err / self.s_wrist_pos)
+            + self.w_wrist_orient * np.exp(-wrist_orient_err / self.s_wrist_orient)
+            + self.w_joint * np.exp(-joint_err / self.s_joint)
         )
         info = {
             "tool_pos_err": tool_err,
             "target_pos_err": target_err,
-            "hand_qpos_err": hand_err,
+            "wrist_pos_err": wrist_pos_err,
+            "wrist_orient_err": wrist_orient_err,
+            "joint_err": joint_err,
             "tool_gate": tool_gate,
             "target_gate": target_gate,
         }
