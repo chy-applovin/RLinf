@@ -81,6 +81,9 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
         num_denoise_steps: int = 16,
         noise_method: str = "flow_sde",
         noise_level: float = 0.5,
+        noise_level_end: float | None = None,
+        noise_anneal_steps: int = 0,
+        noise_schedule: str = "linear",
         normalize_obs: bool = True,
         add_value_head: bool = True,
         detach_critic_input: bool = True,
@@ -115,7 +118,22 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
         self.action_env_dim = int(action_env_dim)
         self.num_denoise_steps = int(num_denoise_steps)
         self.noise_method = noise_method
+        # Exploration-noise (eta) schedule. noise_level is the START value; if a
+        # schedule is configured (noise_anneal_steps > 0 and noise_level_end set),
+        # the EFFECTIVE eta anneals start -> end over [0, noise_anneal_steps] as a
+        # function of self.global_step. The runner sets global_step on BOTH the
+        # rollout and the actor model each iteration (embodied_runner), so the
+        # effective eta is identical at rollout-time and train-time -> the PPO
+        # ratio (which compares log-probs of the same transition) stays valid.
         self.noise_level = float(noise_level)
+        self.noise_level_end = (
+            None if noise_level_end is None else float(noise_level_end)
+        )
+        self.noise_anneal_steps = int(noise_anneal_steps)
+        assert noise_schedule in ("linear", "cosine"), (
+            f"noise_schedule must be linear|cosine, got {noise_schedule}"
+        )
+        self.noise_schedule = str(noise_schedule)
         self.normalize_obs = bool(normalize_obs)
         self.safe_get_logprob = bool(safe_get_logprob)
         self.ignore_last = bool(ignore_last)
@@ -180,6 +198,13 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
             num_denoise_steps=num_denoise_steps,
             noise_method=str(cfg.get("noise_method", "flow_sde")),
             noise_level=float(cfg.get("noise_level", 0.5)),
+            noise_level_end=(
+                None
+                if cfg.get("noise_level_end", None) is None
+                else float(cfg.get("noise_level_end"))
+            ),
+            noise_anneal_steps=int(cfg.get("noise_anneal_steps", 0)),
+            noise_schedule=str(cfg.get("noise_schedule", "linear")),
             normalize_obs=bool(algo_cfg.get("normalize_obs", True)),
             add_value_head=bool(cfg.get("add_value_head", True)),
             detach_critic_input=bool(cfg.get("detach_critic_input", True)),
@@ -193,6 +218,26 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
 
     def set_global_step(self, global_step: int) -> None:
         self.global_step = int(global_step)
+
+    def _eff_noise(self) -> float:
+        """Effective exploration eta for the current global_step.
+
+        Returns the constant ``noise_level`` unless a schedule is configured
+        (``noise_anneal_steps > 0`` and ``noise_level_end`` set), in which case
+        it anneals ``noise_level`` (start) -> ``noise_level_end`` over
+        ``[0, noise_anneal_steps]`` and then holds at the end value. Linear or
+        cosine. Clamped to > 0 because the flow_sde math uses noise_level**-1.5
+        (see _sde_step), which diverges at 0 — anneal to a small floor, not zero.
+        """
+        end = self.noise_level_end
+        if end is None or self.noise_anneal_steps <= 0:
+            return self.noise_level
+        frac = min(1.0, max(0.0, self.global_step / float(self.noise_anneal_steps)))
+        if self.noise_schedule == "cosine":
+            # 1 -> 0 cosine taper over the anneal window
+            frac = 0.5 * (1.0 - math.cos(math.pi * frac))
+        eta = self.noise_level + (end - self.noise_level) * frac
+        return max(eta, 1e-3)
 
     @staticmethod
     def _disable_dropout(module: nn.Module) -> None:
@@ -260,6 +305,9 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
         data_pred = x_t + s_e * v
         noise_pred = x_t - (1.0 - s_e) * v
 
+        # effective exploration eta for this global_step (constant unless a
+        # noise schedule is configured); same value at rollout- and train-time.
+        nl = self._eff_noise()
         if sample_method == "flow_ode":
             data_w = 1.0 - (s_e - d_e)
             noise_w = s_e - d_e
@@ -267,14 +315,14 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
         elif sample_method == "flow_sde":
             # sigma_i = eta * sqrt(s / (1 - s)); guard s == 1 with the next step.
             denom = torch.where(timesteps == 1.0, timesteps[1], timesteps)
-            sigmas = self.noise_level * torch.sqrt(timesteps / (1.0 - denom))[:-1]
+            sigmas = nl * torch.sqrt(timesteps / (1.0 - denom))[:-1]
             sigma_i = sigmas[idx][:, None, None].expand_as(x_t)
             data_w = 1.0 - (s_e - d_e)
-            noise_w = (s_e - d_e) - sigma_i**2 * d_e / (2.0 * s_e) * math.sqrt(self.noise_level) / self.noise_level**2
+            noise_w = (s_e - d_e) - sigma_i**2 * d_e / (2.0 * s_e) * math.sqrt(nl) / nl**2
             std = torch.sqrt(d_e) * sigma_i
         elif sample_method == "flow_cps":
-            cos_term = math.cos(math.pi * self.noise_level / 2.0)
-            sin_term = math.sin(math.pi * self.noise_level / 2.0)
+            cos_term = math.cos(math.pi * nl / 2.0)
+            sin_term = math.sin(math.pi * nl / 2.0)
             data_w = 1.0 - (s_e - d_e)
             noise_w = (s_e - d_e) * cos_term
             std = (s_e - d_e) * sin_term

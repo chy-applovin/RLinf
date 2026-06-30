@@ -138,7 +138,14 @@ actor:
     num_action_chunks: 4
     add_value_head: True
     noise_method: "flow_sde"
-    noise_level: 0.5
+    noise_level: 0.5         # eta: exploration noise scale (START value if annealing)
+    # Exploration-noise (eta) schedule. Disabled by default (noise_level_end: null)
+    # -> constant eta = noise_level. To enable, set noise_level_end and
+    # noise_anneal_steps > 0: the effective eta anneals noise_level (start) ->
+    # noise_level_end over [0, noise_anneal_steps] global_steps, then holds.
+    noise_level_end: null    # float, e.g. 0.3, to enable annealing
+    noise_anneal_steps: 0    # global_steps over which eta anneals start -> end
+    noise_schedule: linear   # linear | cosine
 
   optim:
     lr: 1.0e-5
