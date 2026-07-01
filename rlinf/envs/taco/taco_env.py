@@ -182,6 +182,17 @@ class TacoEnv(gym.Env):
         self._robot_assets = Path(
             cfg.get("robot_assets_root", None) or cfg.allegro_assets_root
         )
+        # Physics <option> injected into episode scenes. Unset -> the
+        # spider-matched DEFAULT_PHYSICS_OPTION; `physics_option: {}` in the env
+        # config keeps the raw dataset scene (MuJoCo defaults).
+        physics_option = cfg.get("physics_option", None)
+        if physics_option is not None and OmegaConf.is_config(physics_option):
+            physics_option = OmegaConf.to_container(physics_option, resolve=True)
+        self._physics_option = (
+            {str(k): str(v) for k, v in physics_option.items()}
+            if physics_option is not None
+            else None
+        )
         self._episode_cache: dict[str, tuple[EpisodeData, mujoco.MjModel]] = {}
 
         # ------------------------------------------------------------- reward
@@ -291,6 +302,7 @@ class TacoEnv(gym.Env):
                 self.num_points,
                 self.need_tool_cloud,
                 self.spec,
+                physics_option=self._physics_option,
             )
             model = mujoco.MjModel.from_xml_path(ep.scene_xml)
             assert model.nu == self.spec.hand_dim, (

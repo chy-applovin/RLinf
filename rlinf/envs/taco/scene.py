@@ -30,6 +30,9 @@ pipeline:
 from __future__ import annotations
 
 import json
+import os
+import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -192,8 +195,6 @@ def _patch_scene_option(xml_text: str, option: dict[str, str] | None) -> str:
     ``<option>``. ``option=None`` uses ``DEFAULT_PHYSICS_OPTION``; ``option={}``
     is an explicit opt-out (returns the text unchanged).
     """
-    import re
-
     if option is None:
         option = DEFAULT_PHYSICS_OPTION
     if not option:
@@ -205,8 +206,9 @@ def _patch_scene_option(xml_text: str, option: dict[str, str] | None) -> str:
         self_close = tag.rstrip().endswith("/>")
         inner = tag.rstrip()[: -2 if self_close else -1]
         for k, v in option.items():
-            if re.search(rf'\b{k}="[^"]*"', inner):
-                inner = re.sub(rf'\b{k}="[^"]*"', f'{k}="{v}"', inner)
+            attr_re = re.compile(rf'\b{re.escape(k)}="[^"]*"')
+            if attr_re.search(inner):
+                inner = attr_re.sub(lambda _m, k=k, v=v: f'{k}="{v}"', inner)
             else:
                 inner = inner.rstrip() + f' {k}="{v}"'
         merged = inner + ("/>" if self_close else ">")
@@ -278,12 +280,19 @@ def prepare_scene(
         patched = _patch_scene_option(
             (episode_dir / "scene.xml").read_text(), physics_option
         )
-        tmp = scene.with_suffix(".xml.tmp")
-        tmp.write_text(patched)
+        # Unique temp name per writer + atomic replace: concurrent env workers
+        # may race here, but each writes its own temp file and os.replace
+        # overwrites atomically (racers produce identical content anyway).
+        fd, tmp_name = tempfile.mkstemp(
+            dir=taskdir, prefix="scene.", suffix=".xml.tmp"
+        )
         try:
-            tmp.replace(scene)  # atomic; safe under concurrent env workers
-        except FileExistsError:
-            tmp.unlink(missing_ok=True)
+            with os.fdopen(fd, "w") as f:
+                f.write(patched)
+            os.replace(tmp_name, scene)
+        except BaseException:
+            os.unlink(tmp_name)
+            raise
     return str(scene)
 
 

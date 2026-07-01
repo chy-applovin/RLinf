@@ -138,6 +138,14 @@ class TacoEnvGPU(gym.Env):
         # path is fully robot-parametrized via this spec; mjwarp loads whatever
         # scene.xml the dataset provides, so any registered robot works.
         self.spec = get_robot_spec(str(cfg.get("robot", "allegro")))
+        # Physics <option> injected into episode scenes. Unset -> the
+        # spider-matched DEFAULT_PHYSICS_OPTION; `physics_option: {}` in the env
+        # config keeps the raw dataset scene (MuJoCo defaults).
+        physics_option = cfg.get("physics_option", None)
+        if physics_option is not None and OmegaConf.is_config(physics_option):
+            physics_option = OmegaConf.to_container(physics_option, resolve=True)
+        if physics_option is not None:
+            physics_option = {str(k): str(v) for k, v in physics_option.items()}
         self.episode = load_episode_data(
             episode_dirs[0],
             Path(cfg.scene_root) / f"gpu_proc_{seed_offset}",
@@ -146,6 +154,7 @@ class TacoEnvGPU(gym.Env):
             self.num_points,
             self.need_tool_cloud,
             self.spec,
+            physics_option=physics_option,
         )
         self.ep_len = min(self.max_episode_steps, self.episode.num_frames - 1)
 
