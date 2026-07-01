@@ -89,7 +89,7 @@ algorithm:
 env:
   group_name: EnvGroup
   train:
-    sim_backend: cpu
+    sim_backend: gpu
     total_num_envs: 1024
     dataset_root: /root/Data/taco-brush-sharpa-20hz-both
     allegro_assets_root: /root/Data/sharpa_mesh/meshes

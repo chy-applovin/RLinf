@@ -6,8 +6,22 @@ env_type: taco
 # reward.type tracking/zero only, and no video capture.
 sim_backend: cpu
 gpu_cuda_graph: True
-gpu_nconmax_per_env: 100
-gpu_njmax_per_env: 350
+gpu_nconmax_per_env: 100   # per-world contact cap (mjwarp allocates x num_envs); sharpa peak ~55
+gpu_njmax_per_env: 800     # per-world constraint-row cap; sharpa peak ~610, overflow SILENTLY drops rows
+# Solver overrides for the GPU backend only (scene XMLs carry no <option>, so
+# MuJoCo defaults Newton/iterations=100/ls_iterations=50 would be unrolled into
+# the CUDA graph on drivers without conditional graph nodes). <=0 keeps the
+# scene/MuJoCo default. Newton converges in <8 iters on these scenes and beats
+# CG (~6 iters needed) end-to-end; see notebooks/gpusim_bench.ipynb.
+gpu_solver: newton         # newton | cg
+gpu_solver_iterations: 10
+gpu_ls_iterations: 20
+# Physics timestep override for the GPU backend (null keeps the scene default,
+# 0.002 -> 25 substeps per 20 Hz control step). dt A/B (notebooks/
+# gpusim_dt_placement_ab.ipynb) showed dt=0.0025 is within mjwarp run-to-run
+# noise but buys only ~3% end-to-end; dt>=0.004 visibly shifts closed-loop
+# outcomes (and 0.004 does not divide the 50 ms control period). Keep null.
+gpu_timestep: null
 
 # ------------------------------------------------------------------ dataset
 # Each episode folder = one scene (env) instance: scene.xml + objects/ +

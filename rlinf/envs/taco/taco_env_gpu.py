@@ -190,10 +190,34 @@ class TacoEnvGPU(gym.Env):
         self._wp_device = str(wp.get_device())
         self._use_cuda_graph = bool(cfg.get("gpu_cuda_graph", True))
         self._nconmax = int(cfg.get("gpu_nconmax_per_env", 100))
-        self._njmax = int(cfg.get("gpu_njmax_per_env", 350))
+        # Peak observed on the sharpa scenes: ~55 contacts and ~610 constraint
+        # rows per world. mjwarp silently DROPS constraints past njmax, so keep
+        # headroom above the observed peak.
+        self._njmax = int(cfg.get("gpu_njmax_per_env", 800))
+        self._solver = str(cfg.get("gpu_solver", "newton")).lower()
+        self._solver_iterations = int(cfg.get("gpu_solver_iterations", 10))
+        self._ls_iterations = int(cfg.get("gpu_ls_iterations", 20))
+        self._timestep = cfg.get("gpu_timestep", None)
 
         self.model_cpu = mujoco.MjModel.from_xml_path(self.episode.scene_xml)
         assert self.model_cpu.nu == self.hand_dim
+        if self._timestep is not None and float(self._timestep) > 0:
+            self.model_cpu.opt.timestep = float(self._timestep)
+        # The TACO scene XMLs carry no <option> element, so MuJoCo defaults
+        # apply: Newton, iterations=100, ls_iterations=50. The solver converges
+        # in <8 iterations on these scenes; with graph_conditional=False (see
+        # _build_warp_env) the iteration loop is fully unrolled into the CUDA
+        # graph, so a tight, config-driven cap keeps the graph small.
+        if self._solver == "cg":
+            self.model_cpu.opt.solver = mujoco.mjtSolver.mjSOL_CG
+        elif self._solver == "newton":
+            self.model_cpu.opt.solver = mujoco.mjtSolver.mjSOL_NEWTON
+        else:
+            raise ValueError(f"gpu_solver must be newton or cg, got {self._solver}")
+        if self._solver_iterations > 0:
+            self.model_cpu.opt.iterations = self._solver_iterations
+        if self._ls_iterations > 0:
+            self.model_cpu.opt.ls_iterations = self._ls_iterations
         self.substeps = max(
             1,
             round((1.0 / self.episode.frequency) / float(self.model_cpu.opt.timestep)),
@@ -239,11 +263,22 @@ class TacoEnvGPU(gym.Env):
 
         with wp.ScopedDevice(self._wp_device):
             self.model_wp = mjwarp.put_model(self.model_cpu)
+            # Conditional CUDA graph nodes (used by mjwarp's capture_while
+            # solver loop) need driver >= CUDA 12.4. Without them, (a) graph
+            # capture of mjwarp.step raises, and (b) the uncaptured fallback
+            # host-syncs after EVERY solver iteration. Unroll the solver loop
+            # instead: iterations are capped by opt.iterations (see __init__)
+            # and per-world early-exit still happens inside the kernels.
+            if self._use_cuda_graph and not wp.is_conditional_graph_supported():
+                self.model_wp.opt.graph_conditional = False
+            # mjwarp's put_data nconmax/njmax are PER-WORLD sizes (total
+            # contact allocation is nconmax * nworld internally); do not
+            # multiply by num_envs here or the allocation is num_envs^2.
             self.data_wp = mjwarp.put_data(
                 self.model_cpu,
                 data_cpu,
                 nworld=self.num_envs,
-                nconmax=self._nconmax * self.num_envs,
+                nconmax=self._nconmax,
                 njmax=self._njmax,
             )
             # Warm-up step OUTSIDE capture: kernel modules cannot be loaded
@@ -413,6 +448,10 @@ class TacoEnvGPU(gym.Env):
         rewards = self._compute_rewards(qpos)
         if done_before:
             rewards = torch.zeros_like(rewards)
+        # mjwarp has no BADQACC auto-reset (CPU MuJoCo resets diverged worlds,
+        # see MUJOCO_LOG.TXT): a few worlds can go NaN near episode end. Zero
+        # their rewards so returns/advantages stay finite; track the fraction.
+        rewards = torch.nan_to_num(rewards, nan=0.0)
         self._returns += rewards
         self._push_obs_frame(qpos)
 
@@ -473,6 +512,7 @@ class TacoEnvGPU(gym.Env):
         success = (tool_err < self.success_threshold_m) & torch.full(
             (self.num_envs,), done
         )
+        sim_nan = torch.isnan(self._qpos()).any(dim=1).float().cpu()
         return {
             "return": rets,
             "episode_len": lens,
@@ -481,6 +521,7 @@ class TacoEnvGPU(gym.Env):
             "tool_pos_err_final_m": tool_err,
             "target_pos_err_final_m": target_err,
             "hand_qpos_err_final": hand_err,
+            "sim_nan_frac": sim_nan,
         }
 
     def close(self):
