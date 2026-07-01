@@ -1452,12 +1452,20 @@ class EnvWorker(Worker):
             "normalize_advantages": self.cfg.algorithm.get(
                 "normalize_advantages", True
             ),
+            "raft_type": self.cfg.algorithm.get("raft_type", "top_k_perc_adv1"),
+            "raft_top_k_percent": self.cfg.algorithm.get(
+                "raft_top_k_percent",
+                self.cfg.algorithm.get("raft_k_percent", 0.1),
+            ),
         }
         advantages_and_returns = calculate_adv_and_returns(**kwargs)
         rollout_batch.update(advantages_and_returns)
-        if kwargs["loss_mask"] is not None:
+        if "loss_mask" not in advantages_and_returns and kwargs["loss_mask"] is not None:
             rollout_batch["loss_mask"] = kwargs["loss_mask"]
-        if kwargs["loss_mask_sum"] is not None:
+        if (
+            "loss_mask_sum" not in advantages_and_returns
+            and kwargs["loss_mask_sum"] is not None
+        ):
             rollout_batch["loss_mask_sum"] = kwargs["loss_mask_sum"]
         return rollout_batch
 

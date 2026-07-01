@@ -104,11 +104,40 @@ def calculate_adv_and_returns(**kwargs) -> tuple[torch.Tensor, Optional[torch.Te
     task_type = kwargs["task_type"]
     if task_type == "embodied":
         kwargs = preprocess_embodied_advantages_inputs(**kwargs)
-        if adv_type != "gae":
+        # These algorithms operate on the per-step reward sequence. The
+        # remaining adv types (grpo, reinpp, raw, ...) first collapse rewards
+        # into a single per-trajectory score.
+        per_step_adv_types = (
+            "gae",
+            "ppo_return_as_adv",
+            "raft_step",
+            "raft_episode",
+        )
+        if adv_type not in per_step_adv_types:
             kwargs = calculate_scores(**kwargs)
-        advantages, returns = fn(**kwargs)
+        out = fn(**kwargs)
+        extra_outputs = {}
+        if isinstance(out, dict):
+            advantages = out["advantages"]
+            returns = out.get("returns", None)
+            extra_outputs = {
+                k: v
+                for k, v in out.items()
+                if k not in ("advantages", "returns")
+            }
+        else:
+            advantages, returns = out
+        post_kwargs = dict(kwargs)
+        if "loss_mask" in extra_outputs:
+            post_kwargs["loss_mask"] = extra_outputs["loss_mask"]
+        else:
+            post_kwargs.pop("loss_mask", None)
+        if "loss_mask_sum" in extra_outputs:
+            post_kwargs["loss_mask_sum"] = extra_outputs["loss_mask_sum"]
+        else:
+            post_kwargs.pop("loss_mask_sum", None)
         res = postprocess_embodied_advantages_outputs(
-            advantages=advantages, returns=returns, **kwargs
+            advantages=advantages, returns=returns, **post_kwargs
         )
     else:
         # reasoning tasks

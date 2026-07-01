@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
 from typing import Optional
 
 import torch
@@ -19,6 +20,50 @@ import torch
 from rlinf.algorithms.registry import register_advantage
 from rlinf.algorithms.utils import kl_penalty, safe_normalize
 from rlinf.utils.utils import masked_mean
+
+_RAFT_SUPPORTED_TYPES = ("top_k_perc_adv1",)
+
+
+def _parse_raft_top_k_percent(value: float) -> float:
+    """Accept 0.1 or 10 as the same top-10% setting."""
+    pct = float(value)
+    if pct > 1.0:
+        pct = pct / 100.0
+    if not (0.0 < pct <= 1.0):
+        raise ValueError(
+            "algorithm.raft_top_k_percent must be in (0, 1] or (0, 100], "
+            f"got {value}"
+        )
+    return pct
+
+
+def _raft_top_k_count(num_items: int, top_k_percent: float) -> int:
+    if num_items <= 0:
+        return 0
+    return max(1, min(num_items, int(math.ceil(num_items * top_k_percent))))
+
+
+def _raft_validate_type(raft_type: str) -> None:
+    if raft_type not in _RAFT_SUPPORTED_TYPES:
+        raise ValueError(
+            f"Unsupported raft_type='{raft_type}'. "
+            f"Currently supported: {_RAFT_SUPPORTED_TYPES}"
+        )
+
+
+def _raft_valid_mask(
+    rewards: torch.Tensor, loss_mask: Optional[torch.Tensor]
+) -> torch.Tensor:
+    if loss_mask is None:
+        return torch.ones_like(rewards, dtype=torch.bool)
+    return loss_mask.to(device=rewards.device, dtype=torch.bool)
+
+
+def _raft_loss_mask_sum(selected_mask: torch.Tensor) -> torch.Tensor:
+    # ``masked_mean_ratio`` divides by loss_mask_sum before applying the mask;
+    # clamp empty envs to one so unselected envs do not create 0/0 NaNs.
+    per_env = selected_mask.sum(dim=0, keepdim=True).clamp_min(1)
+    return per_env.expand_as(selected_mask)
 
 
 @register_advantage("gae")
@@ -84,6 +129,144 @@ def compute_gae_advantages_and_returns(
         returns = safe_normalize(returns, loss_mask=loss_mask)
 
     return advantages, returns
+
+
+@register_advantage("ppo_return_as_adv")
+def compute_return_as_advantages_and_returns(
+    rewards: torch.Tensor,
+    gamma: float = 1.0,
+    normalize_advantages: bool = True,
+    normalize_returns: bool = False,
+    loss_mask: Optional[torch.Tensor] = None,
+    dones: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Critic-free advantage estimation that uses the per-step return as advantage.
+
+    This backs the ``PPO_with_return_as_adv`` algorithm. The policy-gradient
+    objective is identical to PPO, but no value function is involved at any point:
+    every step's advantage is simply the discounted Monte-Carlo return-to-go
+
+        adv_t = G_t = sum_{k >= t} gamma^{k - t} * r_k
+
+    where the accumulation is reset at episode boundaries (via ``dones``). Because
+    there is no critic, this avoids value-function bias/error early in training,
+    at the cost of higher-variance advantages.
+
+    NOTE: ``values`` is intentionally unused here (no bootstrapping, no critic).
+
+    Args:
+        rewards (torch.Tensor): Rewards per timestep. Shape: [seq_len, bsz].
+        gamma (float, optional): Discount factor. Defaults to 1.0.
+        normalize_advantages (bool, optional): Whether to whiten advantages over
+            valid entries. Defaults to True (mirrors GAE/PPO behavior).
+        normalize_returns (bool, optional): Whether to whiten returns. Defaults to False.
+        loss_mask (Optional[torch.Tensor]): Mask of valid entries. Shape: [seq_len, bsz].
+        dones (torch.Tensor): Done flags (1 if episode ended, else 0).
+            Shape: [seq_len + 1, bsz].
+
+    Returns:
+        Tuple[torch.Tensor, torch.Tensor]: (advantages, returns), each [seq_len, bsz].
+            ``returns`` carries the raw (un-normalized) return-to-go for logging; it
+            is not consumed by the critic-free actor loss.
+    """
+    T = rewards.shape[0]
+    returns = torch.zeros_like(rewards)
+    running_return = torch.zeros_like(rewards[0])
+
+    for step in reversed(range(T)):
+        # Reset the carried return-to-go across episode boundaries so a new
+        # episode does not leak return from the previous one.
+        not_done = (~dones[step + 1]) if dones is not None else 1.0
+        running_return = rewards[step] + gamma * not_done * running_return
+        returns[step] = running_return
+
+    advantages = returns
+    if normalize_advantages:
+        advantages = safe_normalize(advantages, loss_mask=loss_mask)
+    if normalize_returns:
+        returns = safe_normalize(returns, loss_mask=loss_mask)
+
+    return advantages, returns
+
+
+@register_advantage("raft_step")
+def compute_raft_step_advantages(
+    rewards: torch.Tensor,
+    raft_type: str = "top_k_perc_adv1",
+    raft_top_k_percent: float = 0.1,
+    loss_mask: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> dict[str, torch.Tensor | None]:
+    """RAFT-style step filtering for embodied rollouts.
+
+    Select the top-k-percent valid reward entries over the whole rollout pool,
+    set their advantages to 1, and mask out every other entry. For
+    ``reward_type=chunk_level`` the reward entries have already been summed over
+    each action chunk before this function is called, so the selected unit is a
+    chunk transition. For ``reward_type=action_level`` the selected unit is one
+    primitive env action.
+    """
+    _raft_validate_type(str(raft_type))
+    top_k_percent = _parse_raft_top_k_percent(raft_top_k_percent)
+    valid = _raft_valid_mask(rewards, loss_mask)
+    selected = torch.zeros_like(valid, dtype=torch.bool)
+
+    valid_flat_idx = valid.flatten().nonzero(as_tuple=False).flatten()
+    k = _raft_top_k_count(int(valid_flat_idx.numel()), top_k_percent)
+    if k > 0:
+        flat_rewards = rewards.detach().flatten()
+        top_local_idx = torch.topk(flat_rewards[valid_flat_idx], k=k).indices
+        selected_flat = selected.flatten()
+        selected_flat[valid_flat_idx[top_local_idx]] = True
+        selected = selected_flat.view_as(selected)
+
+    advantages = selected.to(dtype=rewards.dtype)
+    return {
+        "advantages": advantages,
+        "returns": None,
+        "loss_mask": selected,
+        "loss_mask_sum": _raft_loss_mask_sum(selected),
+    }
+
+
+@register_advantage("raft_episode")
+def compute_raft_episode_advantages(
+    rewards: torch.Tensor,
+    raft_type: str = "top_k_perc_adv1",
+    raft_top_k_percent: float = 0.1,
+    loss_mask: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> dict[str, torch.Tensor | None]:
+    """RAFT-style episode filtering for embodied rollouts.
+
+    Sum rewards over time for each env trajectory, keep the top-k-percent
+    trajectories, set all valid samples inside those trajectories to advantage
+    1, and mask out every other trajectory. This is intended for the common
+    TACO setup where one env contributes one fixed-start rollout per global
+    step; auto-reset multi-episode packing is not interpreted specially here.
+    """
+    _raft_validate_type(str(raft_type))
+    top_k_percent = _parse_raft_top_k_percent(raft_top_k_percent)
+    valid = _raft_valid_mask(rewards, loss_mask)
+    selected_env = torch.zeros(rewards.shape[1], device=rewards.device, dtype=torch.bool)
+
+    valid_env = valid.any(dim=0)
+    valid_env_idx = valid_env.nonzero(as_tuple=False).flatten()
+    k = _raft_top_k_count(int(valid_env_idx.numel()), top_k_percent)
+    if k > 0:
+        scores = (rewards.detach() * valid.to(dtype=rewards.dtype)).sum(dim=0)
+        top_local_idx = torch.topk(scores[valid_env_idx], k=k).indices
+        selected_env[valid_env_idx[top_local_idx]] = True
+
+    selected = valid & selected_env.unsqueeze(0)
+    advantages = selected.to(dtype=rewards.dtype)
+    return {
+        "advantages": advantages,
+        "returns": None,
+        "loss_mask": selected,
+        "loss_mask_sum": _raft_loss_mask_sum(selected),
+    }
 
 
 @register_advantage("grpo")

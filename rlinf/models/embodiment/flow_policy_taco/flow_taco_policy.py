@@ -81,6 +81,8 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
         num_denoise_steps: int = 16,
         noise_method: str = "flow_sde",
         noise_level: float = 0.5,
+        fix_noise_index: bool = False,
+        noise_index: int = 0,
         normalize_obs: bool = True,
         add_value_head: bool = True,
         detach_critic_input: bool = True,
@@ -116,6 +118,8 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
         self.num_denoise_steps = int(num_denoise_steps)
         self.noise_method = noise_method
         self.noise_level = float(noise_level)
+        self.fix_noise_index = bool(fix_noise_index)
+        self.noise_index = int(noise_index)
         self.normalize_obs = bool(normalize_obs)
         self.safe_get_logprob = bool(safe_get_logprob)
         self.ignore_last = bool(ignore_last)
@@ -180,6 +184,8 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
             num_denoise_steps=num_denoise_steps,
             noise_method=str(cfg.get("noise_method", "flow_sde")),
             noise_level=float(cfg.get("noise_level", 0.5)),
+            fix_noise_index=bool(cfg.get("fix_noise_index", False)),
+            noise_index=int(cfg.get("noise_index", cfg.get("index_number", 0))),
             normalize_obs=bool(algo_cfg.get("normalize_obs", True)),
             add_value_head=bool(cfg.get("add_value_head", True)),
             detach_critic_input=bool(cfg.get("detach_critic_input", True)),
@@ -320,7 +326,17 @@ class FlowPolicyTacoForRL(nn.Module, BasePolicy):
 
         if mode == "train":
             high = n - 2 if self.ignore_last else n - 1
-            denoise_ind = random.randint(0, max(high, 0))
+            if self.fix_noise_index:
+                if self.noise_index < 0 or self.noise_index > max(high, 0):
+                    raise ValueError(
+                        "actor.model.noise_index is outside the valid denoise "
+                        f"range: noise_index={self.noise_index}, "
+                        f"valid=[0, {max(high, 0)}], "
+                        f"num_denoise_steps={n}, ignore_last={self.ignore_last}"
+                    )
+                denoise_ind = self.noise_index
+            else:
+                denoise_ind = random.randint(0, max(high, 0))
             denoise_inds = torch.full((bsize, n), denoise_ind, dtype=torch.long)
         else:
             denoise_inds = torch.full((bsize, n), -1, dtype=torch.long)

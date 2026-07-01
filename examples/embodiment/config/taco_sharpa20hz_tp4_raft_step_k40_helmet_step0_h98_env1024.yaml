@@ -1,0 +1,220 @@
+defaults:
+- env/taco_brush_allegro@env.train
+- env/taco_brush_allegro@env.eval
+- model/flow_policy_taco@actor.model
+- training_backend/fsdp@actor.fsdp_config
+- weight_syncer/patch_syncer@weight_syncer
+- override hydra/job_logging: stdout
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  searchpath:
+  - file://${oc.env:EMBODIED_PATH}/config/
+cluster:
+  num_nodes: 1
+  component_placement:
+    actor,env,rollout: 3
+runner:
+  task_type: embodied
+  logger:
+    log_path: /root/RLinf/logs/sharpa20hz-tp4-helmet-raftstep-k40-step0-h98-env1024
+    project_name: taco-allegro-flow-rl
+    experiment_name: sharpa20hz-tp4-helmet-raftstep-k40-step0-h98-env1024
+    logger_backends:
+    - wandb
+    - tensorboard
+    wandb_tags:
+    - sharpa20hz
+    - tp4
+    - step0
+    - h98
+    - env1024
+    - raft_step
+    - top40
+    - object-hand-tracking
+    - brush__brush__helmet__20231027_011
+    wandb_notes: 'RAFT step-filtering run. Episode=brush__brush__helmet__20231027_011.
+      Reset from demo frame 0 and roll out to episode end: max_episode_steps=98, max_steps_per_rollout_epoch=100.
+      Select top 40% chunk-level samples by reward, set adv=1, mask the rest. Initial
+      IL checkpoint: /root/flow-policy/outputs/flow-policy/sharpa20hz_tp4/checkpoints/epoch_4100.pt.
+      One GPU placement: 3.'
+  max_epochs: 5000
+  max_steps: -1
+  only_eval: false
+  val_check_interval: -1
+  save_interval: 500
+  resume_dir: null
+  ckpt_path: null
+algorithm:
+  normalize_advantages: false
+  kl_penalty: kl
+  group_size: 1
+  reward_coef: 1.0
+  rollout_epoch: 1
+  eval_rollout_epoch: 1
+  reward_type: chunk_level
+  logprob_type: token_level
+  entropy_type: token_level
+  update_epoch: 1
+  adv_type: raft_step
+  loss_type: actor
+  loss_agg_func: token-mean
+  kl_beta: 0.0
+  entropy_bonus: 0
+  clip_ratio_high: 0.2
+  clip_ratio_low: 0.2
+  clip_ratio_c: 3.0
+  value_clip: 10.0
+  huber_delta: 10.0
+  gamma: 0.99
+  gae_lambda: 0.95
+  filter_rewards: false
+  rewards_lower_bound: 0.1
+  rewards_upper_bound: 0.9
+  sampling_params:
+    do_sample: true
+    temperature_train: 1.0
+    temperature_eval: 0.6
+    top_k: 50
+    top_p: 1.0
+    repetition_penalty: 1.0
+    add_BOS: false
+  length_params:
+    max_new_token: null
+    max_length: 1024
+    min_length: 1
+  raft_type: top_k_perc_adv1
+  raft_top_k_percent: 0.4
+env:
+  group_name: EnvGroup
+  train:
+    sim_backend: cpu
+    total_num_envs: 1024
+    dataset_root: /root/Data/taco-brush-sharpa-20hz-both
+    allegro_assets_root: /root/Data/sharpa_mesh/meshes
+    robot_name: sharpa
+    robot_asset_glob: '*.STL'
+    robot_asset_aliases:
+      DP_HB1_4F.STL: right_DP.STL
+      DP_visual_HB1_4F.STL: right_DP_visual.STL
+      DP_HB1_TH.STL: right_thumb_DP.STL
+      DP_Visual_HB1_TH.STL: right_thumb_DP_visual.STL
+      elastomer_HB1_4F.STL: elastomer.STL
+      elastomer_HB1_TH.STL: thumb_elastomer.STL
+    trajectory_file: trajectory_mpc_20hz.npz
+    pointcloud_dir: 20hz_mpc_pointcloud
+    obs_horizon: 4
+    hand_dim: 56
+    episodes:
+    - brush__brush__helmet__20231027_011
+    max_episode_steps: 98
+    max_steps_per_rollout_epoch: 100
+    ignore_terminations: false
+    reward:
+      type: tracking
+      tool_pos_weight: 1.0
+      target_pos_weight: 1.0
+      hand_qpos_weight: 1.0
+      tool_pos_scale: 0.05
+      target_pos_scale: 0.05
+      hand_qpos_scale: 0.35
+      contact_weight: 0.0
+    single_step:
+      enabled: false
+    demo_start:
+      enabled: false
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: false
+      min_frame: 0
+    horizon_curriculum:
+      enabled: false
+    rsi:
+      enabled: false
+    early_termination:
+      enabled: false
+  eval:
+    sim_backend: cpu
+    total_num_envs: 16
+    dataset_root: /root/Data/taco-brush-sharpa-20hz-both
+    allegro_assets_root: /root/Data/sharpa_mesh/meshes
+    robot_name: sharpa
+    robot_asset_glob: '*.STL'
+    robot_asset_aliases:
+      DP_HB1_4F.STL: right_DP.STL
+      DP_visual_HB1_4F.STL: right_DP_visual.STL
+      DP_HB1_TH.STL: right_thumb_DP.STL
+      DP_Visual_HB1_TH.STL: right_thumb_DP_visual.STL
+      elastomer_HB1_4F.STL: elastomer.STL
+      elastomer_HB1_TH.STL: thumb_elastomer.STL
+    trajectory_file: trajectory_mpc_20hz.npz
+    pointcloud_dir: 20hz_mpc_pointcloud
+    obs_horizon: 4
+    hand_dim: 56
+    episodes:
+    - brush__brush__helmet__20231027_011
+    max_episode_steps: 98
+    max_steps_per_rollout_epoch: 100
+    reward:
+      type: tracking
+      tool_pos_weight: 1.0
+      target_pos_weight: 1.0
+      hand_qpos_weight: 1.0
+      tool_pos_scale: 0.05
+      target_pos_scale: 0.05
+      hand_qpos_scale: 0.35
+      contact_weight: 0.0
+    single_step:
+      enabled: false
+    demo_start:
+      enabled: false
+      hand_obs_noise_std: 0.0
+      perturb_init_hand: false
+      min_frame: 0
+    group_size: 1
+    is_eval: true
+    seed: 1000
+rollout:
+  group_name: RolloutGroup
+  generation_backend: huggingface
+  enable_offload: false
+  pipeline_stage_num: 1
+  model:
+    model_path: ${actor.model.model_path}
+    precision: ${actor.model.precision}
+actor:
+  group_name: ActorGroup
+  training_backend: fsdp
+  micro_batch_size: 16
+  global_batch_size: 1024
+  seed: 42
+  enable_offload: false
+  model:
+    model_path: /root/flow-policy/outputs/flow-policy/sharpa20hz_tp4/checkpoints/epoch_4100.pt
+    random_init: false
+    num_action_chunks: 4
+    action_dim: 56
+    add_value_head: false
+    noise_method: flow_sde
+    noise_level: 0.5
+  optim:
+    lr: 1.0e-05
+    value_lr: 0.0001
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-08
+    weight_decay: 0.01
+    clip_grad: 1.0
+    critic_warmup_steps: 0
+  fsdp_config:
+    strategy: fsdp
+    sharding_strategy: no_shard
+    gradient_checkpointing: false
+    mixed_precision:
+      param_dtype: ${actor.model.precision}
+      reduce_dtype: ${actor.model.precision}
+      buffer_dtype: ${actor.model.precision}
+reward:
+  use_reward_model: false
+critic:
+  use_critic_model: false

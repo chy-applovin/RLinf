@@ -25,6 +25,8 @@ noise_method: "flow_sde"  # flow_ode | flow_sde | flow_cps
 noise_level: 0.5          # exploration noise scale (eta)
 safe_get_logprob: False
 ignore_last: False        # if True, never inject noise at the final denoise step
+fix_noise_index: False    # if True, inject noise only at actor.model.noise_index
+noise_index: 0            # denoise step index j for fixed single-step noise injection
 
 # --------------------------------------------------------------------- critic
 add_value_head: True

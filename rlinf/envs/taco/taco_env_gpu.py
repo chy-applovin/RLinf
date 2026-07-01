@@ -43,8 +43,6 @@ from omegaconf import OmegaConf
 
 from rlinf.envs.taco.scene import (
     HAND_DIM,
-    TARGET_OBJ_QPOS,
-    TOOL_OBJ_QPOS,
     load_episode_data,
     select_episodes,
 )
@@ -120,6 +118,14 @@ class TacoEnvGPU(gym.Env):
         self.num_points = int(cfg.num_points)
         self.max_episode_steps = int(cfg.max_episode_steps)
         self.success_threshold_m = float(cfg.get("success_threshold_m", 0.1))
+        self.hand_dim = int(cfg.get("hand_dim", HAND_DIM))
+        self._pointcloud_dir = str(cfg.get("pointcloud_dir", "pointcloud"))
+        self._robot_name = str(cfg.get("robot_name", "allegro"))
+        self._robot_asset_glob = str(cfg.get("robot_asset_glob", "*.stl"))
+        aliases = cfg.get("robot_asset_aliases", {}) or {}
+        if OmegaConf.is_config(aliases):
+            aliases = OmegaConf.to_container(aliases, resolve=True)
+        self._robot_asset_aliases = dict(aliases)
 
         # ----------------------------------------------------------- episode
         episode_names = cfg.get("episodes", None)
@@ -143,7 +149,15 @@ class TacoEnvGPU(gym.Env):
             str(cfg.trajectory_file),
             self.num_points,
             self.need_tool_cloud,
+            hand_dim=self.hand_dim,
+            pointcloud_dir=self._pointcloud_dir,
+            robot_name=self._robot_name,
+            robot_asset_glob=self._robot_asset_glob,
+            robot_asset_aliases=self._robot_asset_aliases,
         )
+        self.hand_dim = int(self.episode.hand_dim)
+        self.tool_obj_qpos = self.episode.tool_obj_qpos
+        self.target_obj_qpos = self.episode.target_obj_qpos
         self.ep_len = min(self.max_episode_steps, self.episode.num_frames - 1)
 
         # ------------------------------------------------------------ reward
@@ -179,7 +193,7 @@ class TacoEnvGPU(gym.Env):
         self._njmax = int(cfg.get("gpu_njmax_per_env", 350))
 
         self.model_cpu = mujoco.MjModel.from_xml_path(self.episode.scene_xml)
-        assert self.model_cpu.nu == HAND_DIM
+        assert self.model_cpu.nu == self.hand_dim
         self.substeps = max(
             1,
             round((1.0 / self.episode.frequency) / float(self.model_cpu.opt.timestep)),
@@ -198,7 +212,7 @@ class TacoEnvGPU(gym.Env):
 
         # rolling obs history buffers (B, To, ...)
         b, to, k = self.num_envs, self.obs_horizon, self.num_points
-        self._hist_qpos = torch.zeros(b, to, HAND_DIM, **f32)
+        self._hist_qpos = torch.zeros(b, to, self.hand_dim, **f32)
         self._hist_pc = torch.zeros(b, to, k, 3, **f32)
         self._hist_tool_pc = (
             torch.zeros(b, to, k, 3, **f32) if self.need_tool_cloud else None
@@ -268,7 +282,7 @@ class TacoEnvGPU(gym.Env):
             wp.copy(self.data_wp.qvel, wp.from_torch(qvel0.contiguous()))
             wp.copy(
                 self.data_wp.ctrl,
-                wp.from_torch(torch.zeros(b, HAND_DIM, **f32)),
+                wp.from_torch(torch.zeros(b, self.hand_dim, **f32)),
             )
             wp.copy(
                 self.data_wp.qacc_warmstart,
@@ -297,9 +311,9 @@ class TacoEnvGPU(gym.Env):
 
     def _push_obs_frame(self, qpos: torch.Tensor) -> None:
         """Append the current frame to the rolling obs history (batched)."""
-        hand = qpos[:, :HAND_DIM]
-        p_t = qpos[:, TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
-        r_t = _quat_to_rotmat(qpos[:, TARGET_OBJ_QPOS.start + 3 : TARGET_OBJ_QPOS.stop])
+        hand = qpos[:, : self.hand_dim]
+        p_t = qpos[:, self.target_obj_qpos.start : self.target_obj_qpos.start + 3]
+        r_t = _quat_to_rotmat(qpos[:, self.target_obj_qpos.start + 3 : self.target_obj_qpos.stop])
         # (B, K, 3) = local (K,3) @ R^T (B,3,3) + p
         pc = torch.einsum("kj,bij->bki", self.target_local, r_t) + p_t[:, None, :]
 
@@ -308,9 +322,9 @@ class TacoEnvGPU(gym.Env):
         self._hist_pc = torch.roll(self._hist_pc, -1, dims=1)
         self._hist_pc[:, -1] = pc
         if self.need_tool_cloud:
-            p_r = qpos[:, TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
+            p_r = qpos[:, self.tool_obj_qpos.start : self.tool_obj_qpos.start + 3]
             r_r = _quat_to_rotmat(
-                qpos[:, TOOL_OBJ_QPOS.start + 3 : TOOL_OBJ_QPOS.stop]
+                qpos[:, self.tool_obj_qpos.start + 3 : self.tool_obj_qpos.stop]
             )
             tool_pc = (
                 torch.einsum("kj,bij->bki", self.tool_local, r_r) + p_r[:, None, :]
@@ -336,16 +350,16 @@ class TacoEnvGPU(gym.Env):
         """Frame-aligned (tool_err, target_err, hand_err), each (B,)."""
         demo = self.demo_qpos[min(self.steps, self.episode.num_frames - 1)]
         tool_err = torch.linalg.norm(
-            qpos[:, TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3]
-            - demo[TOOL_OBJ_QPOS.start : TOOL_OBJ_QPOS.start + 3],
+            qpos[:, self.tool_obj_qpos.start : self.tool_obj_qpos.start + 3]
+            - demo[self.tool_obj_qpos.start : self.tool_obj_qpos.start + 3],
             dim=1,
         )
         target_err = torch.linalg.norm(
-            qpos[:, TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3]
-            - demo[TARGET_OBJ_QPOS.start : TARGET_OBJ_QPOS.start + 3],
+            qpos[:, self.target_obj_qpos.start : self.target_obj_qpos.start + 3]
+            - demo[self.target_obj_qpos.start : self.target_obj_qpos.start + 3],
             dim=1,
         )
-        hand_err = (qpos[:, :HAND_DIM] - demo[:HAND_DIM]).abs().mean(dim=1)
+        hand_err = (qpos[:, : self.hand_dim] - demo[: self.hand_dim]).abs().mean(dim=1)
         return tool_err, target_err, hand_err
 
     def _compute_rewards(self, qpos: torch.Tensor) -> torch.Tensor:
@@ -381,7 +395,7 @@ class TacoEnvGPU(gym.Env):
         if isinstance(actions, np.ndarray):
             actions = torch.from_numpy(actions)
         actions = actions.to(device=self.device, dtype=torch.float32)
-        assert actions.shape == (self.num_envs, HAND_DIM)
+        assert actions.shape == (self.num_envs, self.hand_dim)
 
         done_before = self.steps >= self.ep_len
         with wp.ScopedDevice(self._wp_device):
@@ -422,7 +436,7 @@ class TacoEnvGPU(gym.Env):
         if isinstance(chunk_actions, np.ndarray):
             chunk_actions = torch.from_numpy(chunk_actions)
         chunk_actions = chunk_actions.to(device=self.device, dtype=torch.float32)
-        assert chunk_actions.ndim == 3 and chunk_actions.shape[2] == HAND_DIM
+        assert chunk_actions.ndim == 3 and chunk_actions.shape[2] == self.hand_dim
         chunk_size = chunk_actions.shape[1]
 
         obs_list, infos_list, chunk_rewards = [], [], []

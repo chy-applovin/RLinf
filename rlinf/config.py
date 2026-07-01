@@ -841,6 +841,45 @@ def validate_embodied_cfg(cfg):
             f"Current value: {add_value_head}"
         )
 
+    # PPO_with_return_as_adv: a critic-free variant of PPO that uses the per-step
+    # discounted return-to-go directly as the advantage. No value function is
+    # involved, so it must be paired with a critic-free loss (e.g. "actor").
+    if cfg.algorithm.adv_type == "ppo_return_as_adv":
+        assert cfg.algorithm.loss_type not in (
+            "actor_critic",
+            "decoupled_actor_critic",
+        ), (
+            "algorithm.adv_type='ppo_return_as_adv' is a critic-free algorithm "
+            "(no value function); pair it with a critic-free loss such as "
+            f"algorithm.loss_type='actor'. Got loss_type='{cfg.algorithm.loss_type}'."
+        )
+
+    # RAFT-style top-k filtering is critic-free: selected rollout samples get
+    # adv=1 and all others are removed from the actor loss mask.
+    if cfg.algorithm.adv_type in ("raft_step", "raft_episode"):
+        assert cfg.algorithm.loss_type not in (
+            "actor_critic",
+            "decoupled_actor_critic",
+        ), (
+            f"algorithm.adv_type='{cfg.algorithm.adv_type}' is critic-free; "
+            "pair it with a critic-free loss such as algorithm.loss_type='actor'. "
+            f"Got loss_type='{cfg.algorithm.loss_type}'."
+        )
+        raft_type = cfg.algorithm.get("raft_type", "top_k_perc_adv1")
+        assert raft_type == "top_k_perc_adv1", (
+            "Only algorithm.raft_type='top_k_perc_adv1' is currently supported; "
+            f"got '{raft_type}'."
+        )
+        top_k = float(
+            cfg.algorithm.get(
+                "raft_top_k_percent", cfg.algorithm.get("raft_k_percent", 0.1)
+            )
+        )
+        assert 0.0 < top_k <= 100.0, (
+            "algorithm.raft_top_k_percent must be in (0, 1] as a fraction or "
+            f"(0, 100] as a percentage; got {top_k}."
+        )
+
     # process num-envs
     component_placement = HybridComponentPlacement(cfg, Cluster())
     stage_num = cfg.rollout.pipeline_stage_num
