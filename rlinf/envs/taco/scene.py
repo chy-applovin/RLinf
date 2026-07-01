@@ -30,6 +30,9 @@ pipeline:
 from __future__ import annotations
 
 import json
+import os
+import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -165,16 +168,77 @@ def select_episodes(
 
 
 # ---------------------------------------------------------------------- scene io
+# Physics <option> injected into episode scenes that ship without one. The TACO
+# dataset scenes omit <option>, so MuJoCo falls back to its heavy defaults:
+# timestep=0.002 (=> 25 physics substeps per 20 Hz control step) and a Newton
+# iteration cap of 100. Matching the Spider retargeting scenes
+# (timestep=0.01 => 5 substeps, integrator=implicitfast) makes the physics
+# ~4x cheaper per env at the same control rate. The iteration cap is left at 10
+# for tidiness but is NOT the lever: MuJoCo's solver iterates to a tolerance and
+# early-terminates, so 100 vs 10 measures the same. NOTE: the timestep change
+# alters contact dynamics
+# vs the 0.002 default -- validate RL training quality when enabling. Pass
+# ``physics_option={}`` to prepare_scene/load_episode_data to keep the raw scene.
+DEFAULT_PHYSICS_OPTION: dict[str, str] = {
+    "timestep": "0.01",
+    "iterations": "10",
+    "ls_iterations": "50",
+    "integrator": "implicitfast",
+}
+
+
+def _patch_scene_option(xml_text: str, option: dict[str, str] | None) -> str:
+    """Return ``xml_text`` with a physics ``<option>`` set to ``option``.
+
+    Inserts a new ``<option .../>`` right after the ``<mujoco>`` tag when the
+    scene has none (the TACO case), or merges the attributes into an existing
+    ``<option>``. ``option=None`` uses ``DEFAULT_PHYSICS_OPTION``; ``option={}``
+    is an explicit opt-out (returns the text unchanged).
+    """
+    if option is None:
+        option = DEFAULT_PHYSICS_OPTION
+    if not option:
+        return xml_text
+
+    existing = re.search(r"<option\b[^>]*>", xml_text)
+    if existing:
+        tag = existing.group(0)
+        self_close = tag.rstrip().endswith("/>")
+        inner = tag.rstrip()[: -2 if self_close else -1]
+        for k, v in option.items():
+            attr_re = re.compile(rf'\b{re.escape(k)}="[^"]*"')
+            if attr_re.search(inner):
+                inner = attr_re.sub(lambda _m, k=k, v=v: f'{k}="{v}"', inner)
+            else:
+                inner = inner.rstrip() + f' {k}="{v}"'
+        merged = inner + ("/>" if self_close else ">")
+        return xml_text[: existing.start()] + merged + xml_text[existing.end() :]
+
+    attrs = " ".join(f'{k}="{v}"' for k, v in option.items())
+    return re.sub(
+        r"(<mujoco\b[^>]*>)", rf"\1\n  <option {attrs}/>", xml_text, count=1
+    )
+
+
 def prepare_scene(
-    episode_dir: Path, scene_root: Path, spec: RobotSpec, robot_assets: Path
+    episode_dir: Path,
+    scene_root: Path,
+    spec: RobotSpec,
+    robot_assets: Path,
+    physics_option: dict[str, str] | None = None,
 ) -> str:
-    """Symlink the episode into a Spider processed layout; return scene.xml path.
+    """Materialize the episode into a Spider processed layout; return scene.xml path.
 
     Layout (so ``meshdir=../../../assets/`` inside the episode scene resolves):
 
         {scene_root}/assets/robots/{spec.name}/assets/*.STL  (+ spec.mesh_alias)
         {scene_root}/assets/objects/{tool_*,target_*}
         {scene_root}/{spec.name}/bimanual/{episode}/scene.xml
+
+    The episode ``scene.xml`` is written (not symlinked) with a physics
+    ``<option>`` injected (see ``DEFAULT_PHYSICS_OPTION``); the written file lives
+    at the same depth as the old symlink so ``meshdir=../../../assets/`` still
+    resolves. Pass ``physics_option={}`` to keep the raw (slow-default) scene.
     """
     rob = scene_root / "assets" / "robots" / spec.name / "assets"
     rob.mkdir(parents=True, exist_ok=True)
@@ -213,10 +277,22 @@ def prepare_scene(
     taskdir.mkdir(parents=True, exist_ok=True)
     scene = taskdir / "scene.xml"
     if not scene.exists():
+        patched = _patch_scene_option(
+            (episode_dir / "scene.xml").read_text(), physics_option
+        )
+        # Unique temp name per writer + atomic replace: concurrent env workers
+        # may race here, but each writes its own temp file and os.replace
+        # overwrites atomically (racers produce identical content anyway).
+        fd, tmp_name = tempfile.mkstemp(
+            dir=taskdir, prefix="scene.", suffix=".xml.tmp"
+        )
         try:
-            scene.symlink_to(episode_dir / "scene.xml")
-        except FileExistsError:
-            pass
+            with os.fdopen(fd, "w") as f:
+                f.write(patched)
+            os.replace(tmp_name, scene)
+        except BaseException:
+            os.unlink(tmp_name)
+            raise
     return str(scene)
 
 
@@ -271,8 +347,14 @@ def load_episode_data(
     num_points: int,
     need_tool_cloud: bool,
     spec: RobotSpec,
+    physics_option: dict[str, str] | None = None,
 ) -> EpisodeData:
-    """Load everything needed to instantiate + observe one episode scene."""
+    """Load everything needed to instantiate + observe one episode scene.
+
+    ``physics_option`` is forwarded to ``prepare_scene`` (see
+    ``DEFAULT_PHYSICS_OPTION``): ``None`` injects the spider-matched physics
+    ``<option>`` and ``{}`` keeps the raw dataset scene.
+    """
     traj = np.load(episode_dir / trajectory_file, allow_pickle=True)
     qpos_demo = traj["qpos"].astype(np.float64)
     qvel_demo = traj["qvel"].astype(np.float64)
@@ -293,7 +375,9 @@ def load_episode_data(
     meta_path = episode_dir / "pointcloud" / "meta.json"
     meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
 
-    scene_xml = prepare_scene(episode_dir, scene_root, spec, robot_assets)
+    scene_xml = prepare_scene(
+        episode_dir, scene_root, spec, robot_assets, physics_option=physics_option
+    )
     return EpisodeData(
         episode_dir=episode_dir,
         name=episode_dir.name,
